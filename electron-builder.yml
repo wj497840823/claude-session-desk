@@ -1,0 +1,48 @@
+appId: com.local.claude-session-manager
+productName: Claude 会话管理器
+npmRebuild: false
+directories:
+  output: dist
+  buildResources: build
+asar: true
+files:
+  - out/**
+  - package.json
+  - LICENSE
+  - THIRD_PARTY_NOTICES.md
+  - "!node_modules/**"
+  - node_modules/node-pty/**
+  - "!node_modules/node-pty/prebuilds/darwin-*/**"
+  - "!node_modules/node-pty/prebuilds/win32-arm64/**"
+asarUnpack:
+  - node_modules/node-pty/**
+extraResources:
+  - from: build/icon.png
+    to: icon.png
+win:
+  electronLanguages:
+    - zh-CN
+    - en-US
+  target:
+    - target: portable
+      arch:
+        - x64
+    - target: nsis
+      arch:
+        - x64
+    - target: zip
+      arch:
+        - x64
+  icon: build/icon.png
+  artifactName: ClaudeSessionManager-${version}-win-${arch}.${ext}
+portable:
+  artifactName: ClaudeSessionManager-${version}-portable.exe
+  splashImage: build/splash.bmp
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Claude 会话管理器
+  artifactName: ClaudeSessionManager-${version}-setup.${ext}

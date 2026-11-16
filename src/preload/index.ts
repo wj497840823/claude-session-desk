@@ -1,0 +1,76 @@
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
+import type { ClaudeViewApi } from '@shared/types'
+import { IPC } from '@shared/ipc'
+
+const api: ClaudeViewApi = {
+  pickAttachments: (context) => ipcRenderer.invoke(IPC.attachmentsPick, context),
+  attachDroppedFiles: (context, files) => ipcRenderer.invoke(IPC.attachmentsAdd, context,
+    files.map((file) => webUtils.getPathForFile(file as Parameters<typeof webUtils.getPathForFile>[0]))),
+  pasteClipboard: (context) => ipcRenderer.invoke(IPC.attachmentsPaste, context),
+  listAttachments: (context) => ipcRenderer.invoke(IPC.attachmentsList, context),
+  removeAttachments: (context, ids) => ipcRenderer.invoke(IPC.attachmentsRemove, context, ids),
+  fileAction: (context, reference, action) => ipcRenderer.invoke(IPC.fileAction, context, reference, action),
+  checkFileReferences: (context, references) => ipcRenderer.invoke(IPC.fileReferencesCheck, context, references),
+  getSnapshot: () => ipcRenderer.invoke(IPC.snapshotGet),
+  refresh: () => ipcRenderer.invoke(IPC.snapshotRefresh),
+  getSessionDetail: (sessionKey) =>
+    ipcRenderer.invoke(IPC.sessionDetail, sessionKey),
+  getHistoryDetail: (sessionKey) =>
+    ipcRenderer.invoke(IPC.sessionHistoryDetail, sessionKey),
+  search: (query, requestId) =>
+    ipcRenderer.invoke(IPC.sessionSearch, query, requestId),
+  setFavorite: (sessionKey, favorite) =>
+    ipcRenderer.invoke(IPC.sessionFavorite, sessionKey, favorite),
+  resumeSession: (sessionKey) => ipcRenderer.invoke(IPC.sessionResume, sessionKey),
+  deleteSession: (sessionKey) => ipcRenderer.invoke(IPC.sessionDelete, sessionKey),
+  deleteSessions: (sessionKeys) => ipcRenderer.invoke(IPC.sessionsDelete, sessionKeys),
+  deleteHistorySessions: (sessionKeys) =>
+    ipcRenderer.invoke(IPC.historyDelete, sessionKeys),
+  exportSession: (sessionKey) => ipcRenderer.invoke(IPC.sessionExport, sessionKey),
+  openProjectFolder: (projectKey) =>
+    ipcRenderer.invoke(IPC.projectOpen, projectKey),
+  openProjectTerminal: (projectKey) =>
+    ipcRenderer.invoke(IPC.projectTerminalOpen, projectKey),
+  deleteProjectSessions: (projectKey) =>
+    ipcRenderer.invoke(IPC.projectSessionsDelete, projectKey),
+  openExternalPath: (path) => ipcRenderer.invoke(IPC.pathOpen, path),
+  openFolder: (path) => ipcRenderer.invoke(IPC.folderOpen, path),
+  pickFolder: () => ipcRenderer.invoke(IPC.folderPick),
+  startTerminal: (options) => ipcRenderer.invoke(IPC.terminalStart, options),
+  writeTerminal: (ptyId, data) =>
+    ipcRenderer.invoke(IPC.terminalWrite, ptyId, data),
+  resizeTerminal: (ptyId, cols, rows) =>
+    ipcRenderer.invoke(IPC.terminalResize, ptyId, cols, rows),
+  stopTerminal: (ptyId) => ipcRenderer.invoke(IPC.terminalStop, ptyId),
+  updateSettings: (patch) => ipcRenderer.invoke(IPC.settingsUpdate, patch),
+  onTerminalData: (callback) => {
+    const listener = (_event: unknown, payload: { ptyId: string; data: string }): void => {
+      callback(payload)
+    }
+    ipcRenderer.on(IPC.terminalData, listener)
+    return () => {
+      ipcRenderer.removeListener(IPC.terminalData, listener)
+    }
+  },
+  onTerminalExit: (callback) => {
+    const listener = (
+      _event: unknown,
+      payload: { ptyId: string; exitCode: number; signal?: number }
+    ): void => {
+      callback(payload)
+    }
+    ipcRenderer.on(IPC.terminalExit, listener)
+    return () => {
+      ipcRenderer.removeListener(IPC.terminalExit, listener)
+    }
+  },
+  onDataChanged: (callback) => {
+    const listener = (): void => callback()
+    ipcRenderer.on(IPC.dataChanged, listener)
+    return () => {
+      ipcRenderer.removeListener(IPC.dataChanged, listener)
+    }
+  }
+}
+
+contextBridge.exposeInMainWorld('api', api)

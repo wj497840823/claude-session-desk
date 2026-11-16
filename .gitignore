@@ -1,0 +1,32 @@
+node_modules/
+out/
+dist/
+*.log
+
+# Local audits, backups, binaries and agent work notes
+.audit-backups/
+.exe/
+.superpowers/
+docs/superpowers/
+.claude/
+.codex/
+release-source/
+coverage/
+.cache/
+*.tsbuildinfo
+
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
+*.local
+*.pem
+*.key
+*.p12
+*.pfx
+electron-builder.env
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
