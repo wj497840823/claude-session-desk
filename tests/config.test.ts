@@ -135,6 +135,14 @@ describe('ConfigStore', () => {
     expect(settings.sessionClickAction).toBe('continue')
   })
 
+  it('defaults desktop notifications on and persists an opt-out', async () => {
+    const { config } = await store()
+    expect((await config.readSettings()).desktopNotifications).toBe(true)
+    const settings = await config.updateSettings({ desktopNotifications: false })
+    expect(settings.desktopNotifications).toBe(false)
+    expect((await config.readSettings()).desktopNotifications).toBe(false)
+  })
+
   it('round-trips the metadata cache and ignores corrupt cache data', async () => {
     const { dir, config } = await store()
     const cache = {

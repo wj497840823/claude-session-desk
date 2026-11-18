@@ -71,6 +71,10 @@ function normalizeSettings(raw: Partial<AppSettings> | undefined): AppSettings {
       typeof settings.minimizeToTray === 'boolean'
         ? settings.minimizeToTray
         : DEFAULT_APP_SETTINGS.minimizeToTray,
+    desktopNotifications:
+      typeof settings.desktopNotifications === 'boolean'
+        ? settings.desktopNotifications
+        : DEFAULT_APP_SETTINGS.desktopNotifications,
     theme:
       typeof settings.theme === 'string' &&
       THEMES.includes(settings.theme as AppTheme)

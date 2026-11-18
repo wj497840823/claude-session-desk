@@ -20,7 +20,7 @@ import {
 import { Terminal, type ITheme } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
-import type { Attachment, ClipboardPaste, TerminalDataEvent, TerminalExitEvent, TerminalPermissionMode } from '@shared/types'
+import type { Attachment, ClipboardPaste, SessionUsage, TerminalDataEvent, TerminalExitEvent, TerminalPermissionMode } from '@shared/types'
 import {
   deleteSession,
   exportSession,
@@ -33,6 +33,8 @@ import { FileLink, FileReferenceMenu, openFileReference, type FileMenuTarget } f
 import { registerTerminalFileLinks } from '../lib/terminalFileLinks'
 import { addDraftFiles, emptyDraft, loadDraft, removeDraftFiles, saveDraft } from '../lib/attachmentDraft'
 import { checkFileReference } from '../lib/fileReferenceChecks'
+import { attachmentText } from '@shared/fileReferences'
+import { formatCompactTokens, formatUsageCost } from '@shared/usage'
 
 const LIGHT_THEME: ITheme = {
   background: '#ffffff',
@@ -78,6 +80,15 @@ export default function TerminalTab({
   const themeSetting = useStore(
     (state) => state.snapshot?.settings.theme ?? 'system'
   )
+  const activity = useStore((state) =>
+    session.sessionId ? state.terminalActivity[session.sessionId] : undefined
+  )
+  const sessionKey = snapshot?.sessions.find((item) =>
+    item.source === 'transcript' && item.id === session.sessionId && item.projectPath === session.cwd
+  )?.key ?? snapshot?.sessions.find((item) =>
+    item.source === 'transcript' && item.id === session.sessionId
+  )?.key ?? null
+  const [usage, setUsage] = useState<SessionUsage | null>(null)
 
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
@@ -89,7 +100,7 @@ export default function TerminalTab({
   const resizeRef = useRef<() => void>(() => undefined)
   const activeRef = useRef(active)
   const attachmentInputRef = useRef<{
-    paste: () => Promise<void>; pick: () => Promise<void>; drop: (files: unknown[]) => Promise<void>
+    paste: (stage?: boolean) => Promise<void>; pick: () => Promise<void>; drop: (files: unknown[]) => Promise<void>
     remove: (ids: string[], clearDraft?: boolean) => Promise<void>; send: (submit: boolean) => Promise<void>
   }>({ paste: async () => undefined, pick: async () => undefined, drop: async () => undefined,
     remove: async () => undefined, send: async () => undefined })
@@ -113,6 +124,7 @@ export default function TerminalTab({
   const draftInputRef = useRef<HTMLTextAreaElement>(null)
   const [sending, setSending] = useState(false)
   const [dragging, setDragging] = useState(false)
+  const [launched, setLaunched] = useState(false)
   const [fileMenu, setFileMenu] = useState<FileMenuTarget | null>(null)
   const menuRef = useRef<HTMLDivElement>(null)
   const claudeMenuRef = useRef<HTMLDivElement>(null)
@@ -209,7 +221,10 @@ export default function TerminalTab({
       const result = await checkFile(reference)
       return !result.ok || !result.path
     })
-    const insert = async (task: () => Promise<ClipboardPaste>, notifyEmpty = false): Promise<void> => {
+    const insert = async (
+      task: () => Promise<ClipboardPaste>,
+      options: { stage?: boolean; notifyEmpty?: boolean } = {}
+    ): Promise<void> => {
       const ptyId = ptyIdRef.current
       if (!ptyId || disposed) {
         showToast({ kind: 'error', message: '请等待 Claude 对话启动后再添加附件' })
@@ -225,12 +240,19 @@ export default function TerminalTab({
         if (ptyIdRef.current !== ptyId) throw new Error('对话已结束，请重新添加附件')
         if (result.attachments.length) {
           mergeAttachments(result.attachments)
-          setDraft((previous) => addDraftFiles(previous, result.attachments))
-          if (activeRef.current) requestAnimationFrame(() => draftInputRef.current?.focus())
+          if (options.stage) {
+            setDraft((previous) => addDraftFiles(previous, result.attachments))
+            if (activeRef.current) requestAnimationFrame(() => draftInputRef.current?.focus())
+          } else {
+            // Copying a file or image inserts its reference immediately; the
+            // attachment record stays removable without another confirmation.
+            term.paste(attachmentText(result.attachments.map((file) => file.path)))
+            if (activeRef.current) term.focus()
+          }
         } else if (result.text) {
           if (draftRef.current.text || draftRef.current.files.length) setDraft((previous) => ({ ...previous, text: previous.text + result.text }))
           else term.paste(result.text)
-        } else if (notifyEmpty) showToast({ kind: 'error', message: '剪贴板中没有可粘贴的文件、图片或文本' })
+        } else if (options.notifyEmpty) showToast({ kind: 'error', message: '剪贴板中没有可粘贴的文件、图片或文本' })
         if (activeRef.current && !result.attachments.length && !draftRef.current.text) term.focus()
       } catch (error) {
         if (!disposed) showToast({ kind: 'error', message: `添加或粘贴失败：${error instanceof Error ? error.message : String(error)}` })
@@ -240,9 +262,9 @@ export default function TerminalTab({
       }
     }
     attachmentInputRef.current = {
-      paste: () => insert(() => window.api.pasteClipboard(context), true),
-      pick: () => insert(async () => ({ attachments: await window.api.pickAttachments(context) })),
-      drop: (files) => insert(async () => ({ attachments: await window.api.attachDroppedFiles(context, files) })),
+      paste: (stage = false) => insert(() => window.api.pasteClipboard(context), { notifyEmpty: true, stage }),
+      pick: () => insert(async () => ({ attachments: await window.api.pickAttachments(context) }), { stage: true }),
+      drop: (files) => insert(async () => ({ attachments: await window.api.attachDroppedFiles(context, files) }), { stage: true }),
       remove: async (ids, clearDraft = false) => {
         if (pendingAttachments || sendingDraft || disposed) return
         pendingAttachments += 1; setAttaching(true)
@@ -287,6 +309,23 @@ export default function TerminalTab({
       void attachmentInputRef.current.paste()
     }
     container.addEventListener('paste', onPaste, true)
+    const onAttachmentsAdded = (event: Event): void => {
+      const detail = (event as CustomEvent<{ sessionId?: string; attachments?: Attachment[] }>).detail
+      if (!detail || detail.sessionId !== session.sessionId || !detail.attachments?.length) return
+      mergeAttachments(detail.attachments)
+      const ptyId = ptyIdRef.current
+      if (!ptyId) {
+        showToast({ kind: 'error', message: '截图已保存，但对话已结束，请重新打开后再插入' })
+        return
+      }
+      void window.api
+        .writeTerminal(ptyId, attachmentText(detail.attachments.map((item) => item.path)))
+        .catch((error: unknown) => {
+          showToast({ kind: 'error', message: `写入截图路径失败：${String(error)}` })
+        })
+      if (activeRef.current) term.focus()
+    }
+    window.addEventListener('csm:attachments-added', onAttachmentsAdded)
     try {
       fit.fit()
     } catch {
@@ -397,10 +436,17 @@ export default function TerminalTab({
           if (disposed) return
           useStore.getState().setSnapshot(snapshot)
         }
+        const forkPending = session.kind === 'fork' &&
+          Boolean(session.forkFromSessionId) &&
+          !useStore.getState().snapshot?.sessions.some((item) => item.id === session.sessionId)
         const result = await window.api.startTerminal({
           cwd: session.cwd,
-          ...(session.kind === 'resume' || useStore.getState().snapshot?.sessions.some((s) => s.id === session.sessionId)
-            ? { sessionId: session.sessionId ?? null } : { newSessionId: session.sessionId }),
+          ...(forkPending
+            ? { newSessionId: session.sessionId, forkFromSessionId: session.forkFromSessionId }
+            : session.kind === 'resume' || useStore.getState().snapshot?.sessions.some((s) => s.id === session.sessionId)
+              ? { sessionId: session.sessionId ?? null }
+              : { newSessionId: session.sessionId }),
+          title: session.sessionTitle ?? session.projectName,
           mode: session.mode,
           cols: Math.max(20, Math.min(1000, term.cols || 100)),
           rows: Math.max(5, Math.min(500, term.rows || 30))
@@ -486,7 +532,7 @@ export default function TerminalTab({
       })
     }
 
-    void startPty()
+    if (!session.dormant) void startPty()
 
     return () => {
       disposed = true
@@ -501,6 +547,7 @@ export default function TerminalTab({
       fileLinks.dispose()
       nativeFileLinks.dispose()
       container.removeEventListener('paste', onPaste, true)
+      window.removeEventListener('csm:attachments-added', onAttachmentsAdded)
       hoveredFileRef.current = null
       darkQuery.removeEventListener('change', onThemeChange)
       textarea?.removeEventListener('focus', onFocus, true)
@@ -526,6 +573,25 @@ export default function TerminalTab({
   }, [fontSize, themeSetting])
 
   useEffect(() => {
+    if (!sessionKey) {
+      setUsage(null)
+      return undefined
+    }
+    let cancelled = false
+    const load = (): void => {
+      void window.api.getSessionUsage(sessionKey).then((value) => {
+        if (!cancelled) setUsage(value)
+      }).catch(() => undefined)
+    }
+    load()
+    const timer = window.setInterval(load, 5000)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [sessionKey])
+
+  useEffect(() => {
     if (!active) {
       dragDepthRef.current = 0; setDragging(false)
       setMenuOpen(false); setClaudeMenuOpen(false); setFileMenu(null)
@@ -544,7 +610,29 @@ export default function TerminalTab({
     return () => cancelAnimationFrame(timer)
   }, [active])
 
-  const status = starting ? '启动中…' : running ? '运行中' : '已结束'
+  const dormant = session.dormant === true && !launched
+  const usageCost = usage ? formatUsageCost(usage.costUSD) : null
+  const usageTitle = usage
+    ? [
+        usage.model ?? '未知模型',
+        `输入 ${formatCompactTokens(usage.inputTokens)} · 输出 ${formatCompactTokens(usage.outputTokens)}`,
+        `缓存 ${formatCompactTokens(usage.cacheReadTokens + usage.cacheWriteTokens)}`,
+        ...(usageCost ? [`估算 ${usageCost}`] : [])
+      ].join('\n')
+    : ''
+  const status = starting
+    ? '启动中…'
+    : running
+      ? activity === 'approval'
+        ? '等待确认'
+        : activity === 'working'
+          ? '工作中…'
+          : activity === 'idle'
+            ? '等待输入'
+            : '运行中'
+      : session.dormant === true && !launched
+        ? '未启动'
+        : '已结束'
   const referencedAttachments = attachments.filter((item) => !draft.files.some((file) => file.path.toLowerCase() === item.path.toLowerCase()))
 
   const confirm = (): void => {
@@ -606,7 +694,17 @@ export default function TerminalTab({
           </span>
         </div>
         <span className="terminal-mode">权限：{MODE_LABELS[session.mode]}</span>
-        <span className={`terminal-status ${running ? 'running' : 'stopped'}`}>
+        {usage && usage.model && (
+          <span className="terminal-usage" title={usageTitle}>
+            <span className="terminal-model">{usage.model}</span>
+            {usage.contextPercent !== null && usage.contextLimit !== null && (
+              <span className={`terminal-context ${usage.contextPercent >= 80 ? 'high' : ''}`}>
+                上下文 {usage.contextPercent.toFixed(0)}%
+              </span>
+            )}
+          </span>
+        )}
+        <span className={`terminal-status ${running ? 'running' : 'stopped'} ${running ? activity ?? '' : ''}`}>
           <span className="terminal-dot" />
           {status}
         </span>
@@ -770,6 +868,32 @@ export default function TerminalTab({
         event.preventDefault()
         setFileMenu({ reference, x: event.clientX, y: event.clientY })
       }} />
+      {dormant && (
+        <div className="terminal-dormant">
+          <div className="terminal-dormant-card">
+            <strong>{session.sessionTitle ?? session.projectName}</strong>
+            <p>
+              {session.kind === 'resume'
+                ? '上次打开的对话标签已恢复，继续后会使用原会话记录。'
+                : session.kind === 'fork'
+                  ? '上次创建的分叉对话标签已恢复；继续后会打开对应的新会话。'
+                  : '上次未启动的对话标签已恢复，继续后会在原项目目录新建对话。'}
+            </p>
+            <div className="terminal-dormant-actions">
+              <button
+                className="btn primary"
+                onClick={() => {
+                  setLaunched(true)
+                  startRef.current()
+                }}
+              >
+                {session.kind === 'resume' || session.kind === 'fork' ? '继续对话' : '开始对话'}
+              </button>
+              <button className="btn" onClick={() => closeTerminal(session.key)}>关闭标签</button>
+            </div>
+          </div>
+        </div>
+      )}
       {(draft.text.length > 0 || draft.files.length > 0) && <section className="attachment-composer" aria-label="附件草稿">
         <div className="attachment-draft-files">
           <span className="attachment-hint">待发送</span>
@@ -785,7 +909,7 @@ export default function TerminalTab({
           onChange={(event) => setDraft((previous) => ({ ...previous, text: event.target.value }))}
           onPaste={(event) => {
             if (Array.from(event.clipboardData.items).some((item) => item.kind === 'file' || item.type.startsWith('image/') || item.type === 'text/uri-list')) {
-              event.preventDefault(); void attachmentInputRef.current.paste()
+              event.preventDefault(); void attachmentInputRef.current.paste(true)
             }
           }}
           onKeyDown={(event) => {

@@ -4,12 +4,20 @@ import type {
   SearchResponse,
   SessionDetail,
   Snapshot,
+  TerminalActivity,
   TerminalPermissionMode
 } from '@shared/types'
 import type { View } from './lib/sessionView'
 import { filterSessions } from './lib/sessionView'
-import { parseStoredBoolean } from './lib/preferences'
+import {
+  DEFAULT_RAIL_WIDTH,
+  RAIL_WIDTH_MIGRATION_KEY,
+  adjustLegacyRailWidth,
+  parseStoredBoolean
+} from './lib/preferences'
 import { nextTabAfterClosing, terminalContext } from './lib/tabNavigation'
+import { loadOpenTabs } from './lib/openTabs'
+import { loadArchived, saveArchived, toggleArchived } from './lib/sessionArchive'
 
 function storedBool(key: string, fallback: boolean): boolean {
   if (typeof window === 'undefined') return fallback
@@ -23,6 +31,19 @@ function storedWidth(key: string, fallback: number, min: number, max: number): n
   if (raw === null) return fallback
   const value = Number(raw)
   return Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : fallback
+}
+
+function storedRailWidth(): number {
+  if (typeof window === 'undefined') return DEFAULT_RAIL_WIDTH
+  try {
+    const migrated = window.localStorage.getItem(RAIL_WIDTH_MIGRATION_KEY) === '1'
+    const adjusted = adjustLegacyRailWidth(window.localStorage.getItem('csm.navigationWidth'), migrated)
+    window.localStorage.setItem(RAIL_WIDTH_MIGRATION_KEY, '1')
+    if (adjusted !== null) window.localStorage.setItem('csm.navigationWidth', String(adjusted))
+  } catch {
+    // A locked-down storage must not prevent the app from starting.
+  }
+  return storedWidth('csm.navigationWidth', DEFAULT_RAIL_WIDTH, 240, 480)
 }
 
 function remember(key: string, value: string | number | boolean): void {
@@ -64,7 +85,7 @@ export interface ToastMessage {
 }
 
 export interface TerminalDialogRequest {
-  kind: 'resume' | 'new' | 'new-project'
+  kind: 'resume' | 'new' | 'new-project' | 'fork'
   cwd: string
   projectName: string
   sessionId?: string
@@ -76,12 +97,15 @@ export interface TerminalSession {
   cwd: string
   projectName: string
   sessionId?: string
+  forkFromSessionId?: string
   sessionTitle?: string
   kind: TerminalDialogRequest['kind']
   mode: TerminalPermissionMode
+  dormant?: boolean
 }
 
 export type TerminalStatus = 'starting' | 'running' | 'stopped'
+export type AttentionKind = 'completed' | 'approval'
 
 interface AppState {
   snapshot: Snapshot | null
@@ -92,6 +116,7 @@ interface AppState {
   matchUuid: string | null
   matchPromptIndex: number | null
   selectedHistory: string[]
+  archived: string[]
   focusedProjectKey: string | null
   expandedProjectKeys: string[]
   followActiveTerminal: boolean
@@ -107,6 +132,8 @@ interface AppState {
   activeTab: string
   recordTabVisible: boolean
   terminalStatus: Record<string, TerminalStatus>
+  terminalActivity: Record<string, TerminalActivity>
+  attention: Record<string, AttentionKind>
   terminalFocused: boolean
   leftRailCollapsed: boolean
   sessionListCollapsed: boolean
@@ -127,6 +154,7 @@ interface AppState {
   ) => void
   closeRecordTab: () => void
   toggleHistorySelection: (key: string) => void
+  toggleSessionArchive: (id: string) => void
   setHistorySelection: (keys: string[]) => void
   clearHistorySelection: () => void
   setQuery: (query: string) => void
@@ -144,6 +172,8 @@ interface AppState {
   closeTerminals: (keys: string[]) => void
   setActiveTerminal: (key: string) => void
   setTerminalStatus: (key: string, status: TerminalStatus) => void
+  setTerminalActivity: (sessionId: string, activity: TerminalActivity) => void
+  setAttention: (sessionId: string, kind: AttentionKind | null) => void
   setTerminalFocused: (focused: boolean) => void
   toggleLeftRail: () => void
   toggleSessionList: () => void
@@ -175,7 +205,7 @@ function terminalNavigation(state: AppState, terminal: TerminalSession, changeVi
 
 function viewNavigation(state: AppState, view: View): Partial<AppState> {
   const selected = state.snapshot?.sessions.find((session) => session.key === state.selectedKey)
-  const keepSelection = Boolean(selected && filterSessions([selected], view).length)
+  const keepSelection = Boolean(selected && filterSessions([selected], view, new Set(state.archived)).length)
   const projectKey = 'projectKey' in view ? view.projectKey : null
   return {
     view,
@@ -194,6 +224,12 @@ function viewNavigation(state: AppState, view: View): Partial<AppState> {
   }
 }
 
+const restoredTabs: TerminalSession[] = loadOpenTabs().map((tab) => ({
+  ...tab,
+  sessionId: tab.sessionId ?? crypto.randomUUID(),
+  dormant: true
+}))
+
 export const useStore = create<AppState>()((set) => ({
   snapshot: null,
   loading: true,
@@ -203,6 +239,7 @@ export const useStore = create<AppState>()((set) => ({
   matchUuid: null,
   matchPromptIndex: null,
   selectedHistory: [],
+  archived: loadArchived(),
   focusedProjectKey: null,
   expandedProjectKeys: storedProjects(),
   followActiveTerminal: false,
@@ -214,15 +251,17 @@ export const useStore = create<AppState>()((set) => ({
   detailLoading: false,
   toast: null,
   terminalDialog: null,
-  terminals: [],
-  activeTab: '',
+  terminals: restoredTabs,
+  activeTab: restoredTabs.at(-1)?.key ?? '',
   recordTabVisible: false,
   terminalStatus: {},
+  terminalActivity: {},
+  attention: {},
   terminalFocused: false,
   leftRailCollapsed: storedBool('csm.leftRailCollapsed', false),
   // Startup always enters the activity view collapsed, including after an upgrade.
   sessionListCollapsed: true,
-  leftRailWidth: storedWidth('csm.navigationWidth', 320, 240, 480),
+  leftRailWidth: storedRailWidth(),
   sessionListWidth: storedWidth('csm.sessionListWidth', 340, 240, 640),
   settingsOpen: false,
   setSnapshot: (snapshot) =>
@@ -305,6 +344,12 @@ export const useStore = create<AppState>()((set) => ({
     })),
   setHistorySelection: (keys) =>
     set({ selectedHistory: [...new Set(keys)] }),
+  toggleSessionArchive: (id) =>
+    set((state) => {
+      const archived = toggleArchived(state.archived, id)
+      saveArchived(archived)
+      return { archived }
+    }),
   clearHistorySelection: () => set({ selectedHistory: [] }),
   setQuery: (query) =>
     set((state) => ({
@@ -325,6 +370,12 @@ export const useStore = create<AppState>()((set) => ({
     set((state) => {
       terminal = { ...terminal, sessionId: terminal.sessionId ?? crypto.randomUUID() }
       const exists = state.terminals.some((item) => item.key === terminal.key)
+      const terminalActivity = { ...state.terminalActivity }
+      const attention = { ...state.attention }
+      if (terminal.sessionId) {
+        delete terminalActivity[terminal.sessionId]
+        delete attention[terminal.sessionId]
+      }
       return {
         ...terminalNavigation(state, terminal, false),
         terminals: exists
@@ -335,6 +386,8 @@ export const useStore = create<AppState>()((set) => ({
         activeTab: terminal.key,
         terminalDialog: null,
         terminalStatus: { ...state.terminalStatus, [terminal.key]: 'starting' },
+        terminalActivity,
+        attention,
         terminalFocused: false
       }
     }),
@@ -348,11 +401,20 @@ export const useStore = create<AppState>()((set) => ({
       const activeTab = nextTabAfterClosing(state.terminals.map((tab) => tab.key), state.activeTab, closing) ??
         (state.recordTabVisible && state.selectedKey ? 'record' : '')
       const active = terminals.find((tab) => tab.key === activeTab)
+      const remainingSessionIds = new Set(terminals.map((tab) => tab.sessionId).filter(Boolean))
+      const terminalActivity = Object.fromEntries(
+        Object.entries(state.terminalActivity).filter(([sessionId]) => remainingSessionIds.has(sessionId))
+      )
+      const attention = Object.fromEntries(
+        Object.entries(state.attention).filter(([sessionId]) => remainingSessionIds.has(sessionId))
+      )
       return {
         ...(active && activeTab !== state.activeTab ? terminalNavigation(state, active) : {}),
         terminals,
         activeTab,
         terminalStatus,
+        terminalActivity,
+        attention,
         terminalFocused: false
       }
     }),
@@ -366,6 +428,17 @@ export const useStore = create<AppState>()((set) => ({
     set((state) => ({
       terminalStatus: { ...state.terminalStatus, [key]: status }
     })),
+  setTerminalActivity: (sessionId, activity) =>
+    set((state) => ({
+      terminalActivity: { ...state.terminalActivity, [sessionId]: activity }
+    })),
+  setAttention: (sessionId, kind) =>
+    set((state) => {
+      const attention = { ...state.attention }
+      if (kind) attention[sessionId] = kind
+      else delete attention[sessionId]
+      return { attention }
+    }),
   setTerminalFocused: (terminalFocused) => set({ terminalFocused }),
   toggleLeftRail: () =>
     set((state) => {

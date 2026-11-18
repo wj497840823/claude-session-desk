@@ -1,14 +1,26 @@
 import {
+  ChevronDown,
+  ChevronUp,
+  Copy,
   Download,
   FolderOpen,
   MessageSquare,
   MoreHorizontal,
+  Search,
   Star,
   Terminal,
-  Trash2
+  Trash2,
+  X
 } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { HistoryDetail, SessionDetail as SessionDetailType } from '@shared/types'
+import {
+  formatCompactTokens,
+  formatUsageCost,
+  summarizeUsage
+} from '@shared/usage'
+import { latestTodos, todoProgress } from '@shared/todos'
+import { findSessionMatches } from '../lib/findInSession'
 import {
   deleteHistorySessions,
   deleteSession,
@@ -51,6 +63,10 @@ export default function SessionDetail(): React.JSX.Element {
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [confirmHistoryDelete, setConfirmHistoryDelete] = useState(false)
   const [commandDialog, setCommandDialog] = useState<string | null>(null)
+  const [findOpen, setFindOpen] = useState(false)
+  const [findQuery, setFindQuery] = useState('')
+  const [findIndex, setFindIndex] = useState(0)
+  const findInputRef = useRef<HTMLInputElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -134,6 +150,35 @@ export default function SessionDetail(): React.JSX.Element {
     }
   }, [selectedKey, revision, setDetail, setHistoryDetail, setDetailLoading, showToast])
 
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 'f') return
+      if (useStore.getState().activeTab !== 'record' || !useStore.getState().detail) return
+      event.preventDefault()
+      setFindOpen(true)
+      requestAnimationFrame(() => findInputRef.current?.select())
+    }
+    window.addEventListener('keydown', onKeyDown, true)
+    return () => window.removeEventListener('keydown', onKeyDown, true)
+  }, [])
+
+  useEffect(() => {
+    setFindIndex(0)
+  }, [findQuery])
+
+  useEffect(() => {
+    setFindOpen(false)
+    setFindQuery('')
+  }, [selectedKey])
+
+  const findMatches = useMemo(
+    () => findOpen && detail ? findSessionMatches(detail.events, findQuery) : [],
+    [findOpen, detail, findQuery]
+  )
+  const activeFindUuid = findOpen && findMatches.length > 0
+    ? findMatches[Math.min(findIndex, findMatches.length - 1)]?.uuid ?? null
+    : null
+
   if (!selectedKey) {
     return (
       <section className="detail-pane">
@@ -147,6 +192,10 @@ export default function SessionDetail(): React.JSX.Element {
     historyDetail?.projectPath ?? detail?.projectPath ?? summary?.projectPath ?? ''
   const favorite = summary?.favorite ?? false
   const promptCount = historyDetail?.prompts.length ?? summary?.promptCount ?? 0
+  const usage = !isHistory && detail ? summarizeUsage(detail.events) : null
+  const cost = usage ? formatUsageCost(usage.costUSD) : null
+  const todos = !isHistory && detail ? latestTodos(detail.events) : null
+  const progress = todos ? todoProgress(todos) : null
 
   return (
     <section className="detail-pane">
@@ -196,6 +245,28 @@ export default function SessionDetail(): React.JSX.Element {
           </button>
         </div>
 
+        {usage && (
+          <div className="detail-usage" aria-label="会话用量">
+            {usage.model && <span className="usage-chip" title={usage.model}>{usage.model}</span>}
+            <span className="usage-chip">输入 {formatCompactTokens(usage.inputTokens)}</span>
+            <span className="usage-chip">输出 {formatCompactTokens(usage.outputTokens)}</span>
+            {(usage.cacheReadTokens > 0 || usage.cacheWriteTokens > 0) && (
+              <span className="usage-chip" title={`缓存读取 ${usage.cacheReadTokens}，缓存写入 ${usage.cacheWriteTokens}`}>
+                缓存 {formatCompactTokens(usage.cacheReadTokens + usage.cacheWriteTokens)}
+              </span>
+            )}
+            {cost && <span className="usage-chip" title="按公开 API 价格估算，仅供参考">≈{cost}</span>}
+            {usage.contextPercent !== null && usage.contextLimit !== null && (
+              <span
+                className={`usage-chip context ${usage.contextPercent >= 80 ? 'high' : ''}`}
+                title={`上下文 ${usage.contextTokens} / ${usage.contextLimit} tokens`}
+              >
+                上下文 {usage.contextPercent.toFixed(0)}%
+              </span>
+            )}
+          </div>
+        )}
+
         <div className="detail-actions">
           {!isHistory && (
             <>
@@ -215,6 +286,23 @@ export default function SessionDetail(): React.JSX.Element {
               >
                 <MessageSquare size={14} />
                 在应用内对话
+              </button>
+              <button
+                className="btn"
+                disabled={!summary || !summary.cwdExists}
+                onClick={() => {
+                  if (!summary?.projectPath) return
+                  openTerminalDialog({
+                    kind: 'fork',
+                    cwd: summary.projectPath,
+                    projectName: projectNameOf(summary.projectPath),
+                    sessionId: summary.id,
+                    sessionTitle: title
+                  })
+                }}
+              >
+                <Copy size={14} />
+                复制并继续
               </button>
               <button
                 className="btn"
@@ -301,6 +389,48 @@ export default function SessionDetail(): React.JSX.Element {
         </div>
       </header>
 
+      {findOpen && !isHistory && (
+        <div className="find-bar" role="search">
+          <Search size={14} aria-hidden />
+          <input
+            ref={findInputRef}
+            value={findQuery}
+            aria-label="在当前会话中查找"
+            placeholder="在当前会话中查找…（Ctrl+F）"
+            spellCheck={false}
+            onChange={(event) => setFindQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') {
+                event.preventDefault()
+                setFindOpen(false)
+                setFindQuery('')
+              } else if (event.key === 'Enter') {
+                event.preventDefault()
+                if (findMatches.length === 0) return
+                setFindIndex((current) => event.shiftKey
+                  ? (current - 1 + findMatches.length) % findMatches.length
+                  : (current + 1) % findMatches.length)
+              }
+            }}
+          />
+          <span className="find-count">
+            {findMatches.length > 0 ? `${Math.min(findIndex + 1, findMatches.length)} / ${findMatches.length}` : '0 / 0'}
+          </span>
+          <button className="icon-button" title="上一个匹配（Shift+Enter）" disabled={findMatches.length === 0}
+            onClick={() => setFindIndex((current) => (current - 1 + findMatches.length) % findMatches.length)}>
+            <ChevronUp size={14} />
+          </button>
+          <button className="icon-button" title="下一个匹配（Enter）" disabled={findMatches.length === 0}
+            onClick={() => setFindIndex((current) => (current + 1) % findMatches.length)}>
+            <ChevronDown size={14} />
+          </button>
+          <button className="icon-button" title="关闭查找（Esc）"
+            onClick={() => { setFindOpen(false); setFindQuery('') }}>
+            <X size={14} />
+          </button>
+        </div>
+      )}
+
       {detailLoading && !detail && !historyDetail ? (
         <div className="detail-empty">
           {isHistory ? '正在读取历史记录…' : '正在解析会话…'}
@@ -311,7 +441,27 @@ export default function SessionDetail(): React.JSX.Element {
           matchPromptIndex={matchPromptIndex}
         />
       ) : !isHistory && detail ? (
-        <MessageStream key={`${detail.key}:${matchUuid ?? ''}`} detail={detail} matchUuid={matchUuid} />
+        <>
+          {todos && progress && (
+            <section className="todo-panel" aria-label="任务清单">
+              <div className="todo-panel-head">
+                <strong>任务清单</strong>
+                <span>{progress.completed}/{progress.total} 已完成</span>
+              </div>
+              <ul className="todo-list">
+                {todos.map((todo, index) => (
+                  <li key={`${index}-${todo.content}`} className={`todo-item ${todo.status}`}>
+                    <span className="todo-state" aria-hidden="true">
+                      {todo.status === 'completed' ? '✓' : todo.status === 'in_progress' ? '▸' : '○'}
+                    </span>
+                    <span>{todo.status === 'in_progress' && todo.activeForm ? todo.activeForm : todo.content}</span>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
+          <MessageStream key={`${detail.key}:${matchUuid ?? ''}`} detail={detail} matchUuid={matchUuid} focusUuid={activeFindUuid} />
+        </>
       ) : (
         <div className="detail-empty">
           {isHistory ? '无法读取历史记录' : '无法读取此会话'}

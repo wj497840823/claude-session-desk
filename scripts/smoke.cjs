@@ -22,6 +22,10 @@ async function until(check, label, ms = 7000) {
 // Do not show or focus any desktop window during the test.
 BrowserWindow.prototype.show = function () {}
 BrowserWindow.prototype.focus = function () {}
+const overlayCalls = []
+BrowserWindow.prototype.setOverlayIcon = function (_image, description) {
+  overlayCalls.push(description)
+}
 app.on('web-contents-created', (_event, contents) => {
   contents.on('console-message', (details) => {
     if (details?.level === 'error') rendererErrors.push(details.message)
@@ -71,6 +75,7 @@ app.on('web-contents-created', (_event, contents) => {
     checks.push('Missing data root still permits new conversations; terminal/Markdown chunks are deferred')
     assert.equal(await js(`document.querySelector('.rail-nav button').getAttribute('aria-expanded')`), 'false')
     checks.push('Activity sessions start collapsed')
+    assert.equal(Math.round(await js(`document.querySelector('.rail').getBoundingClientRect().width`)), 296, 'Default rail width is compact')
 
     await js(`document.querySelector('button[title="设置"]').focus(); document.querySelector('button[title="设置"]').click()`)
     await until(() => js(`Boolean(document.querySelector('[role="dialog"]'))`), 'settings dialog')
@@ -212,7 +217,7 @@ app.on('web-contents-created', (_event, contents) => {
     await until(() => js(`document.querySelector('.toast')?.textContent.includes('fixture startup failure')`), 'startup error toast')
     assert(await js(`!document.querySelector('button[title="重新开始"]').disabled`))
     checks.push('Rejected terminal startup shows an error and permits retry')
-    await require('./smoke-attachments.cjs')({ win, dir, projectDir, sessionId, configDir, js, until, delay, checks, file, showActivity })
+    await require('./smoke-attachments.cjs')({ win, dir, projectDir, sessionId, configDir, js, until, delay, checks, file, showActivity, overlayCalls })
 
     const clickMenu = async (label) => {
       await js(`document.querySelector('button[title="标签管理"]').click()`)
@@ -241,6 +246,15 @@ app.on('web-contents-created', (_event, contents) => {
     win.webContents.send('data:changed')
     await showActivity()
     await until(() => js(`document.querySelectorAll('.session-row').length === 13`), 'batch fixtures')
+    const embeddedList = await js(`(() => {
+      const list = document.querySelector('.rail-nav .embedded-sessions .session-list');
+      if (!list) return null;
+      return { overflow: getComputedStyle(list).overflowY, client: list.clientHeight, scroll: list.scrollHeight, viewport: innerHeight };
+    })()`)
+    assert(embeddedList && embeddedList.overflow === 'auto', 'Embedded lists scroll internally')
+    assert(embeddedList.client <= Math.ceil(embeddedList.viewport * 0.38) + 2, 'Embedded lists are height-bounded')
+    assert(embeddedList.scroll > embeddedList.client, 'Long embedded lists do not stretch the rail')
+    checks.push('Embedded session lists are height-bounded, compact and scroll internally')
     await js(`window.api.setFavorite('demo/${sessionId}', true)`)
     await js(`window.api.refresh()`)
     win.webContents.send('data:changed')
@@ -286,6 +300,8 @@ app.on('web-contents-created', (_event, contents) => {
     await js(`document.querySelector('[data-tab-key="${tabKeys[11]}"]').click()`)
     await until(() => js(`document.querySelector('.session-row.active')?.dataset.sessionKey === '${batchKeys[11]}'`), 'other anchor')
     assert(await js(`document.querySelector('.rail-project.active')?.dataset.projectKey === 'other'`))
+    assert.equal(await js(`document.querySelectorAll('.rail-project-sessions').length`), 1, 'Only the opened project expands')
+    assert.equal(await js(`document.querySelectorAll('.rail-project-main[aria-expanded="true"]').length`), 1, 'Only one project is marked expanded')
     await clickProject('demo')
     await js(`document.querySelector('button[title="新建对话"]').click()`)
     await until(() => js(`Boolean(document.querySelector('.terminal-start-dialog'))`), 'new conversation in browsed project')
@@ -295,6 +311,7 @@ app.on('web-contents-created', (_event, contents) => {
     await js(`document.querySelector('[data-tab-key="${tabKeys[0]}"]').click()`)
     await until(() => js(`Boolean(document.querySelector('[data-project-key="demo"]').parentElement.querySelector('.session-row.active'))`), 'reopen collapsed project from tab')
     assert(await js(`document.querySelector('[data-project-key="demo"] .rail-project-main').getAttribute('aria-expanded') === 'true'`))
+    assert.equal(await js(`document.querySelectorAll('.rail-project-sessions').length`), 1, 'Returning to demo keeps one expanded project')
     await js(`document.querySelector('[data-tab-key="${tabKeys[11]}"]').click()`)
     checks.push('Switching tabs across projects synchronizes project and session anchors')
     ipcMain.removeHandler('terminal:stop')
@@ -470,6 +487,31 @@ app.on('web-contents-created', (_event, contents) => {
     await js(`document.querySelector('button[title="展开会话列表"], button[title="收起会话列表"]').click()`)
     await until(() => js(`Boolean(document.querySelector('.rail .session-row.active'))`), 'session toggle restores unified sidebar')
     checks.push('The session toggle restores the unified sidebar when it has been hidden')
+
+    const forkSourceKey = await js(`document.querySelector('.rail .session-row.active')?.dataset.sessionKey`)
+    assert(forkSourceKey, 'fork source session row')
+    await js(`document.querySelector('.rail .session-row.active').dispatchEvent(new MouseEvent('contextmenu', {
+      bubbles: true, clientX: 420, clientY: 300
+    }))`)
+    await until(() => js(`Boolean(document.querySelector('.session-context-menu'))`), 'fork context menu')
+    assert(await js(`Array.from(document.querySelectorAll('.session-context-menu button')).some(b => b.textContent.includes('复制并继续'))`))
+    const forkRequests = []
+    ipcMain.removeHandler('terminal:start')
+    ipcMain.handle('terminal:start', (_event, options) => {
+      forkRequests.push(options)
+      return { ok: true, ptyId: 'fork-pty' }
+    })
+    await js(`Array.from(document.querySelectorAll('.session-context-menu button')).find(b => b.textContent.includes('复制并继续')).click()`)
+    await until(() => js(`Boolean(document.querySelector('.terminal-start-dialog'))`), 'fork dialog')
+    assert(await js(`document.querySelector('.terminal-start-dialog h2').textContent.includes('复制并继续')`))
+    await js(`Array.from(document.querySelectorAll('.terminal-start-dialog .dialog-actions button')).find(b => b.textContent.includes('创建副本')).click()`)
+    await until(() => forkRequests.length === 1, 'fork terminal started')
+    const forkSourceId = forkSourceKey.split('/').pop()
+    assert.equal(forkRequests[0].forkFromSessionId, forkSourceId)
+    assert(forkRequests[0].newSessionId && forkRequests[0].newSessionId !== forkSourceId)
+    assert(!forkRequests[0].sessionId)
+    checks.push('Forking a conversation preallocates a new id and resumes the source with --fork-session')
+
     if (process.env.CSM_NAV_SCREENSHOT) {
       win.setSize(1280, 800)
       await delay(100)

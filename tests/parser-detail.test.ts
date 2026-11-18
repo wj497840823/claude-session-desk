@@ -1,7 +1,7 @@
 import { rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { parseSessionDetail } from '../src/main/parser'
+import { parseSessionDetail, parseSessionUsage } from '../src/main/parser'
 import { tempDir, writeJsonl } from './helpers'
 
 const SID = '22222222-2222-4222-8222-222222222222'
@@ -192,5 +192,92 @@ describe('parseSessionDetail', () => {
     const tools = result.events[0]
     if (tools.kind !== 'tools') throw new Error('expected tools')
     expect(tools.calls[0].result).toContain('…（已截断）')
+  })
+
+  it('extracts token usage from assistant records', async () => {
+    const filePath = await fixture([{
+      type: 'assistant',
+      uuid: 'a1',
+      message: {
+        role: 'assistant',
+        model: 'claude-sonnet-4-5',
+        content: [{ type: 'text', text: 'done' }],
+        usage: {
+          input_tokens: 120,
+          output_tokens: 30,
+          cache_read_input_tokens: 4000,
+          cache_creation_input_tokens: 500
+        }
+      }
+    }])
+    const result = await parseSessionDetail(filePath)
+    const event = result.events[0]
+    if (event.kind !== 'assistant') throw new Error('expected assistant')
+    expect(event.usage).toEqual({
+      inputTokens: 120,
+      outputTokens: 30,
+      cacheReadTokens: 4000,
+      cacheWriteTokens: 500
+    })
+  })
+
+  it('extracts TodoWrite task lists and ignores malformed entries', async () => {
+    const filePath = await fixture([{
+      type: 'assistant',
+      uuid: 'a1',
+      message: {
+        role: 'assistant',
+        content: [{
+          type: 'tool_use',
+          id: 'todo-1',
+          name: 'TodoWrite',
+          input: {
+            todos: [
+              { content: '读取代码', status: 'completed', activeForm: '读取代码' },
+              { content: '编写测试', status: 'in_progress' },
+              { content: '缺少状态' },
+              { content: '未知状态', status: 'blocked' }
+            ]
+          }
+        }]
+      }
+    }])
+    const result = await parseSessionDetail(filePath)
+    const event = result.events[0]
+    if (event.kind !== 'tools') throw new Error('expected tools')
+    expect(event.calls[0].todos).toEqual([
+      { content: '读取代码', status: 'completed', activeForm: '读取代码' },
+      { content: '编写测试', status: 'in_progress' }
+    ])
+  })
+
+  it('summarizes usage for live display without building the full event list', async () => {
+    const filePath = await fixture([
+      {
+        type: 'assistant', uuid: 'a1',
+        message: {
+          role: 'assistant', model: 'claude-sonnet-4-5',
+          content: [{ type: 'text', text: 'done' }],
+          usage: { input_tokens: 1000, output_tokens: 200, cache_read_input_tokens: 3000, cache_creation_input_tokens: 500 }
+        }
+      },
+      {
+        type: 'assistant', uuid: 'sidechain', isSidechain: true,
+        message: {
+          role: 'assistant', model: 'side-model',
+          usage: { input_tokens: 99999, output_tokens: 99999 }
+        }
+      }
+    ])
+    const usage = await parseSessionUsage(filePath)
+    expect(usage).toMatchObject({
+      inputTokens: 1000,
+      outputTokens: 200,
+      cacheReadTokens: 3000,
+      cacheWriteTokens: 500,
+      model: 'claude-sonnet-4-5',
+      contextTokens: 4700,
+      contextLimit: 200_000
+    })
   })
 })

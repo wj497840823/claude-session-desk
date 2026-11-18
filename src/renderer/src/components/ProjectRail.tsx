@@ -20,7 +20,7 @@ import {
   openProject,
   openProjectTerminal
 } from '../lib/actions'
-import { formatRelativeTime } from '../lib/sessionView'
+import { formatRelativeTime, isProjectExpanded } from '../lib/sessionView'
 import { useStore } from '../store'
 import ConfirmDialog from './ConfirmDialog'
 import SessionList from './SessionList'
@@ -48,6 +48,12 @@ export default function ProjectRail(): React.JSX.Element {
   const toggleView = useStore((state) => state.toggleView)
   const openTerminalDialog = useStore((state) => state.openTerminalDialog)
   const showToast = useStore((state) => state.showToast)
+  const archived = useStore((state) => state.archived)
+  const terminals = useStore((state) => state.terminals)
+  const terminalStatus = useStore((state) => state.terminalStatus)
+  const terminalActivity = useStore((state) => state.terminalActivity)
+  const activeTab = useStore((state) => state.activeTab)
+  const setActiveTerminal = useStore((state) => state.setActiveTerminal)
   const [historyOpen, setHistoryOpen] = useState(false)
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
   const [deleteSessionsOpen, setDeleteSessionsOpen] = useState(false)
@@ -62,13 +68,41 @@ export default function ProjectRail(): React.JSX.Element {
     }
   }, [focusedProjectKey, selectedKey, sessionListCollapsed, expandedProjectKeys, snapshot?.projects.length])
 
-  const activeCount = snapshot?.transcriptCount ?? 0
+  const activeCount = snapshot?.sessions.filter((session) =>
+    session.source === 'transcript' &&
+    !archived.includes(session.id) &&
+    !archived.includes(session.key)
+  ).length ?? 0
   const favoriteCount =
     snapshot?.sessions.filter((session) => session.favorite).length ?? 0
   const historyCount = snapshot?.historyOnlyCount ?? 0
+  const archivedCount = snapshot?.sessions.filter((session) => archived.includes(session.id)).length ?? 0
+  const runningTabs = terminals.filter((tab) => {
+    const status = terminalStatus[tab.key]
+    return status === 'running' || status === 'starting'
+  })
   const historyEnabled = snapshot?.settings.loadHistory ?? false
+  const activityLabel = (tab: (typeof terminals)[number]): string => {
+    if (terminalStatus[tab.key] === 'starting') return '启动中'
+    const activity = tab.sessionId ? terminalActivity[tab.sessionId] : undefined
+    return activity === 'approval' ? '等待确认' : activity === 'working' ? '工作中' : activity === 'idle' ? '等待输入' : '运行中'
+  }
   const activeProjects =
-    snapshot?.projects.filter((project) => project.transcriptCount > 0) ?? []
+    snapshot?.projects.filter((project) =>
+      snapshot.sessions.some((session) =>
+        session.projectKey === project.key &&
+        session.source === 'transcript' &&
+        !archived.includes(session.id) &&
+        !archived.includes(session.key)
+      )
+    ) ?? []
+  const visibleCountFor = (projectKey: string): number =>
+    snapshot?.sessions.filter((session) =>
+      session.projectKey === projectKey &&
+      session.source === 'transcript' &&
+      !archived.includes(session.id) &&
+      !archived.includes(session.key)
+    ).length ?? 0
   const historyProjects =
     snapshot?.projects.filter((project) => project.historyCount > 0) ?? []
 
@@ -218,6 +252,43 @@ export default function ProjectRail(): React.JSX.Element {
           {!sessionListCollapsed && view.type === 'favorites' && (
             <SessionList embedded />
           )}
+          {archivedCount > 0 && (
+            <>
+              <button
+                className={`rail-item ${view.type === 'archived' ? 'active' : ''}`}
+                aria-expanded={view.type === 'archived' && !sessionListCollapsed}
+                onClick={() => toggleView({ type: 'archived' })}
+              >
+                {view.type === 'archived' && !sessionListCollapsed ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+                <Archive size={15} />
+                <span>已归档</span>
+                <span className="rail-count">{archivedCount}</span>
+              </button>
+              {!sessionListCollapsed && view.type === 'archived' && (
+                <SessionList embedded />
+              )}
+            </>
+          )}
+          {runningTabs.length > 0 && (
+            <div className="rail-running">
+              <div className="rail-heading-row">
+                <div className="rail-heading">运行中</div>
+                <span className="rail-count">{runningTabs.length}</span>
+              </div>
+              {runningTabs.map((tab) => (
+                <button
+                  key={tab.key}
+                  className={`rail-item rail-running-tab ${tab.key === activeTab ? 'active' : ''}`}
+                  onClick={() => setActiveTerminal(tab.key)}
+                  title={`${tab.sessionTitle ?? tab.projectName} · ${tab.cwd}`}
+                >
+                  <span className={`terminal-tab-dot ${terminalStatus[tab.key] ?? 'stopped'} ${tab.sessionId ? terminalActivity[tab.sessionId] ?? '' : ''}`} />
+                  <span className="rail-project-name">{tab.sessionTitle ?? tab.projectName}</span>
+                  <span className="rail-running-status">{activityLabel(tab)}</span>
+                </button>
+              ))}
+            </div>
+          )}
         </nav>
 
         <div className="rail-heading-row">
@@ -232,7 +303,7 @@ export default function ProjectRail(): React.JSX.Element {
         </div>
         <div className="rail-projects">
           {activeProjects.map((project) => {
-            const expanded = view.type === 'project' && !sessionListCollapsed && expandedProjectKeys.includes(project.key)
+            const expanded = isProjectExpanded(view, sessionListCollapsed, expandedProjectKeys, project.key)
             return (
             <div className="rail-project-group" key={project.key}>
             <div
@@ -243,7 +314,7 @@ export default function ProjectRail(): React.JSX.Element {
                   ? 'active'
                   : ''
               }`}
-              title={`${project.path || project.key}\n活动对话 ${project.transcriptCount}${
+              title={`${project.path || project.key}\n活动对话 ${visibleCountFor(project.key)}${
                 project.historyCount > 0
                   ? ` · 历史记录 ${project.historyCount}`
                   : ''
@@ -266,7 +337,7 @@ export default function ProjectRail(): React.JSX.Element {
                     +{project.historyCount}
                   </span>
                 )}
-                <span className="rail-count">{project.transcriptCount}</span>
+                <span className="rail-count">{visibleCountFor(project.key)}</span>
               </button>
               {project.path && (
                 <button

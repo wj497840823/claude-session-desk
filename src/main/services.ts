@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
 import { existsSync, statSync } from 'node:fs'
-import { writeFile } from 'node:fs/promises'
+import { writeFile, stat } from 'node:fs/promises'
 import { basename, dirname, join, resolve } from 'node:path'
 import {
   dialog,
@@ -16,6 +16,7 @@ import type {
   FileContext,
   SearchResponse,
   SessionDetail,
+  SessionUsage,
   Snapshot
 } from '@shared/types'
 import { ConfigStore } from './config'
@@ -26,7 +27,7 @@ import {
 import { deletePaths } from './deletePlan'
 import { buildMarkdown, safeExportFileName } from './exportMarkdown'
 import { removeHistorySessions } from './history'
-import { parseSessionDetail } from './parser'
+import { parseSessionDetail, parseSessionUsage } from './parser'
 import { buildResumeCommand, buildResumeSpawnArgs } from './resumeCommand'
 import { Scanner, type ScanResult } from './scanner'
 import { searchHistory, searchSessions } from './search'
@@ -55,6 +56,7 @@ export class AppServices {
   private index: ScanResult | null = null
   private refreshPromise: Promise<ScanResult> | null = null
   private readonly detailCache = new Map<string, SessionDetail>()
+  private readonly usageCache = new Map<string, { mtimeMs: number; size: number; usage: SessionUsage | null }>()
   private searchToken = 0
 
   constructor(
@@ -174,6 +176,23 @@ export class AppServices {
       if (oldest) this.detailCache.delete(oldest)
     }
     return detail
+  }
+
+  async getUsage(sessionKey: string): Promise<SessionUsage | null> {
+    const { summary, filePath, index } = await this.findSession(sessionKey)
+    if (summary.source !== 'transcript' || !filePath) return null
+    const info = await stat(filePath)
+    const cached = this.usageCache.get(sessionKey)
+    if (cached && cached.mtimeMs === info.mtimeMs && cached.size === info.size) return cached.usage
+    const usage = await parseSessionUsage(filePath)
+    if (this.index === index) {
+      this.usageCache.set(sessionKey, { mtimeMs: info.mtimeMs, size: info.size, usage })
+      if (this.usageCache.size > 20) {
+        const oldest = this.usageCache.keys().next().value
+        if (oldest) this.usageCache.delete(oldest)
+      }
+    }
+    return usage
   }
 
   async getHistoryDetail(sessionKey: string): Promise<HistoryDetail> {

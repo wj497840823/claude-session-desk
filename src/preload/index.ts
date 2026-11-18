@@ -15,6 +15,8 @@ const api: ClaudeViewApi = {
   refresh: () => ipcRenderer.invoke(IPC.snapshotRefresh),
   getSessionDetail: (sessionKey) =>
     ipcRenderer.invoke(IPC.sessionDetail, sessionKey),
+  getSessionUsage: (sessionKey) =>
+    ipcRenderer.invoke(IPC.sessionUsage, sessionKey),
   getHistoryDetail: (sessionKey) =>
     ipcRenderer.invoke(IPC.sessionHistoryDetail, sessionKey),
   search: (query, requestId) =>
@@ -42,6 +44,7 @@ const api: ClaudeViewApi = {
   resizeTerminal: (ptyId, cols, rows) =>
     ipcRenderer.invoke(IPC.terminalResize, ptyId, cols, rows),
   stopTerminal: (ptyId) => ipcRenderer.invoke(IPC.terminalStop, ptyId),
+  updateAttention: (summary) => ipcRenderer.invoke(IPC.attentionUpdate, summary),
   updateSettings: (patch) => ipcRenderer.invoke(IPC.settingsUpdate, patch),
   onTerminalData: (callback) => {
     const listener = (_event: unknown, payload: { ptyId: string; data: string }): void => {
@@ -62,6 +65,35 @@ const api: ClaudeViewApi = {
     ipcRenderer.on(IPC.terminalExit, listener)
     return () => {
       ipcRenderer.removeListener(IPC.terminalExit, listener)
+    }
+  },
+  onTerminalActivity: (callback) => {
+    const listener = (
+      _event: unknown,
+      payload: { ptyId: string; sessionId: string | null; activity: 'working' | 'idle' | 'approval' }
+    ): void => {
+      callback(payload)
+    }
+    ipcRenderer.on(IPC.terminalActivity, listener)
+    return () => {
+      ipcRenderer.removeListener(IPC.terminalActivity, listener)
+    }
+  },
+  onFocusSession: (callback) => {
+    const listener = (_event: unknown, sessionId: string): void => {
+      callback(sessionId)
+    }
+    ipcRenderer.on(IPC.focusSession, listener)
+    return () => {
+      ipcRenderer.removeListener(IPC.focusSession, listener)
+    }
+  },
+  captureScreenshot: (context) => ipcRenderer.invoke(IPC.screenshotCapture, context),
+  onScreenshotTrigger: (callback) => {
+    const listener = (): void => callback()
+    ipcRenderer.on(IPC.screenshotTrigger, listener)
+    return () => {
+      ipcRenderer.removeListener(IPC.screenshotTrigger, listener)
     }
   },
   onDataChanged: (callback) => {

@@ -15,7 +15,9 @@ function tabLabel(
   const base =
     tab.kind === 'resume'
       ? tab.sessionTitle?.trim() || `${tab.projectName} · 恢复`
-      : `${tab.projectName} · 新对话`
+      : tab.kind === 'fork'
+        ? tab.sessionTitle?.trim() || `${tab.projectName} · 副本`
+        : `${tab.projectName} · 新对话`
   const earlier = terminals
     .slice(0, index)
     .filter(
@@ -36,6 +38,7 @@ export default function WorkspacePane(): React.JSX.Element {
   const selectedKey = useStore((state) => state.selectedKey)
   const snapshot = useStore((state) => state.snapshot)
   const terminalStatus = useStore((state) => state.terminalStatus)
+  const terminalActivity = useStore((state) => state.terminalActivity)
   const setActiveTerminal = useStore((state) => state.setActiveTerminal)
   const closeRecordTab = useStore((state) => state.closeRecordTab)
   const openTerminalDialog = useStore((state) => state.openTerminalDialog)
@@ -209,7 +212,7 @@ export default function WorkspacePane(): React.JSX.Element {
             <span
               className={`terminal-tab-dot ${
                 terminalStatus[tab.key] ?? 'stopped'
-              }`}
+              } ${terminalStatus[tab.key] === 'running' && tab.sessionId ? terminalActivity[tab.sessionId] ?? '' : ''}`}
             />
             <span className="terminal-tab-label">
               {tabLabel(terminals, tab, index)}

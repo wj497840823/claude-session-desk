@@ -23,7 +23,7 @@ export function isTerminalPermissionMode(
 }
 
 export function buildClaudeTerminalArgs(
-  options: Pick<TerminalStartOptions, 'sessionId' | 'newSessionId' | 'mode'>
+  options: Pick<TerminalStartOptions, 'sessionId' | 'newSessionId' | 'forkFromSessionId' | 'mode'>
 ): string[] {
   if (!isTerminalPermissionMode(options.mode)) {
     throw new Error('非法权限模式')
@@ -34,9 +34,17 @@ export function buildClaudeTerminalArgs(
   if (options.newSessionId && (!SESSION_ID_RE.test(options.newSessionId) || options.sessionId)) {
     throw new Error('非法新会话 ID')
   }
+  if (options.forkFromSessionId) {
+    if (!SESSION_ID_RE.test(options.forkFromSessionId)) throw new Error('非法分叉来源会话 ID')
+    if (!options.newSessionId) throw new Error('分叉会话缺少新会话 ID')
+  }
 
   const args: string[] = []
-  if (options.sessionId) args.push('--resume', options.sessionId)
+  if (options.forkFromSessionId) {
+    // Claude Code relaunches forks with this exact combination: the new id is
+    // preallocated so the app can track the fork before Claude writes it.
+    args.push('--session-id', options.newSessionId!, '--fork-session', '--resume', options.forkFromSessionId)
+  } else if (options.sessionId) args.push('--resume', options.sessionId)
   else if (options.newSessionId) args.push('--session-id', options.newSessionId)
   if (options.mode !== 'follow') {
     args.push('--permission-mode', options.mode)
@@ -76,10 +84,23 @@ export function normalizeTerminalOptions(value: unknown): TerminalStartOptions {
     throw new Error('非法新会话 ID')
   }
 
+  if (options.title !== undefined && (typeof options.title !== 'string' || options.title.length > 200)) {
+    throw new Error('非法对话标题')
+  }
+
+  if (options.forkFromSessionId !== undefined) {
+    if (typeof options.forkFromSessionId !== 'string' || !SESSION_ID_RE.test(options.forkFromSessionId)) {
+      throw new Error('非法分叉来源会话 ID')
+    }
+    if (options.newSessionId === undefined) throw new Error('分叉会话缺少新会话 ID')
+  }
+
   return {
     cwd: options.cwd,
     sessionId: (options.sessionId as string | null | undefined) ?? null,
     ...(options.newSessionId !== undefined ? { newSessionId: options.newSessionId as string } : {}),
+    ...(options.forkFromSessionId !== undefined ? { forkFromSessionId: options.forkFromSessionId as string } : {}),
+    ...(options.title !== undefined ? { title: options.title } : {}),
     mode: options.mode,
     cols: options.cols as number,
     rows: options.rows as number

@@ -52,6 +52,14 @@ describe('filterSessions', () => {
     ).toEqual(['c', 'a'])
   })
 
+  it('hides archived sessions from normal views and lists them in the archive view', () => {
+    const rows = [session('a', 2, true), session('b', 1)]
+    const archived = new Set(['a'])
+    expect(filterSessions(rows, { type: 'all' }, archived).map((row) => row.key)).toEqual(['b'])
+    expect(filterSessions(rows, { type: 'archived' }, archived).map((row) => row.key)).toEqual(['a'])
+    expect(filterSessions(rows, { type: 'favorites' }, archived)).toHaveLength(0)
+  })
+
   it('filters history-only sessions', () => {
     const rows = [
       session('a', 1),

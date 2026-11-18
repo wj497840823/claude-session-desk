@@ -18,7 +18,13 @@ export default function TopBar(): React.JSX.Element {
     (state) => state.snapshot?.historyOnlyCount ?? 0
   )
   const transcriptCount = useStore(
-    (state) => state.snapshot?.transcriptCount ?? 0
+    (state) => state.snapshot
+      ? state.snapshot.sessions.filter((session) =>
+          session.source === 'transcript' &&
+          !state.archived.includes(session.id) &&
+          !state.archived.includes(session.key)
+        ).length
+      : 0
   )
   const setSettingsOpen = useStore((state) => state.setSettingsOpen)
   const leftRailCollapsed = useStore((state) => state.leftRailCollapsed)
@@ -49,7 +55,8 @@ export default function TopBar(): React.JSX.Element {
     <header className="topbar">
       <div className="brand">
         <span className="brand-mark">C</span>
-        <span>Claude 会话管理器</span>
+        <span>Claude Session Desk</span>
+        <span className="brand-sub">会话工作台</span>
       </div>
       <button
         className="icon-button"

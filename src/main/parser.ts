@@ -1,8 +1,38 @@
 import type { Stats } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { basename } from 'node:path'
-import type { SessionEvent, TitleSource, ToolCall } from '@shared/types'
+import type {
+  SessionEvent,
+  SessionUsage,
+  TitleSource,
+  TodoItem,
+  TodoStatus,
+  TokenUsage,
+  ToolCall
+} from '@shared/types'
+import { summarizeUsage } from '@shared/usage'
 import { parseJsonLine, readJsonlLines } from './jsonl'
+
+const TODO_STATUSES = new Set<TodoStatus>(['pending', 'in_progress', 'completed'])
+
+function normalizeTodos(value: unknown): TodoItem[] {
+  if (!Array.isArray(value)) return []
+  const todos: TodoItem[] = []
+  for (const entry of value.slice(0, 200)) {
+    if (!entry || typeof entry !== 'object') continue
+    const item = entry as Record<string, unknown>
+    if (typeof item.content !== 'string' || !item.content.trim() || item.content.length > 2000) continue
+    if (typeof item.status !== 'string' || !TODO_STATUSES.has(item.status as TodoStatus)) continue
+    todos.push({
+      content: item.content,
+      status: item.status as TodoStatus,
+      ...(typeof item.activeForm === 'string' && item.activeForm.length <= 2000
+        ? { activeForm: item.activeForm }
+        : {})
+    })
+  }
+  return todos
+}
 
 export interface RawRecord {
   type?: string
@@ -12,8 +42,27 @@ export interface RawRecord {
   cwd?: string
   isSidechain?: boolean
   origin?: { kind?: string }
-  message?: { role?: string; content?: unknown; model?: string }
+  message?: { role?: string; content?: unknown; model?: string; usage?: unknown }
   aiTitle?: string
+}
+
+function tokenCount(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? Math.round(value)
+    : 0
+}
+
+function tokenUsageOf(record: RawRecord): TokenUsage | undefined {
+  const usage = record.message?.usage
+  if (!usage || typeof usage !== 'object') return undefined
+  const value = usage as Record<string, unknown>
+  const tokens: TokenUsage = {
+    inputTokens: tokenCount(value.input_tokens),
+    outputTokens: tokenCount(value.output_tokens),
+    cacheReadTokens: tokenCount(value.cache_read_input_tokens),
+    cacheWriteTokens: tokenCount(value.cache_creation_input_tokens)
+  }
+  return Object.values(tokens).some((count) => count > 0) ? tokens : undefined
 }
 
 export interface SessionMeta {
@@ -245,13 +294,15 @@ export async function parseSessionDetail(filePath: string): Promise<ParsedDetail
         .filter((block) => block.type === 'text' && typeof block.text === 'string')
         .map((block) => block.text as string)
         .join('\n\n')
-      if (text.trim()) {
+      const usage = tokenUsageOf(record)
+      if (text.trim() || usage) {
         events.push({
           kind: 'assistant',
           uuid,
           timestamp,
           text,
-          model: record.message?.model
+          model: record.message?.model,
+          usage
         })
       }
       const calls: ToolCall[] = []
@@ -274,6 +325,10 @@ export async function parseSessionDetail(filePath: string): Promise<ParsedDetail
           const files = [input.file_path, input.path, input.notebook_path]
             .filter((path): path is string => typeof path === 'string' && Boolean(path))
           if (files.length) call.files = [...new Set(files)]
+          if (block.name === 'TodoWrite') {
+            const todos = normalizeTodos(input.todos)
+            if (todos.length) call.todos = todos
+          }
         }
         calls.push(call)
         callsById.set(call.id, call)
@@ -285,4 +340,24 @@ export async function parseSessionDetail(filePath: string): Promise<ParsedDetail
   }
 
   return { events, skippedLines }
+}
+
+export async function parseSessionUsage(filePath: string): Promise<SessionUsage | null> {
+  const events: SessionEvent[] = []
+  for await (const line of readJsonlLines(filePath)) {
+    if (!line.trim()) continue
+    const record = parseJsonLine<RawRecord>(line)
+    if (!record || record.type !== 'assistant' || record.isSidechain) continue
+    const usage = tokenUsageOf(record)
+    if (!usage) continue
+    events.push({
+      kind: 'assistant',
+      uuid: '',
+      timestamp: 0,
+      text: '',
+      model: record.message?.model,
+      usage
+    })
+  }
+  return summarizeUsage(events)
 }

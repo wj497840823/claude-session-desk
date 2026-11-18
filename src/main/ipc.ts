@@ -1,9 +1,10 @@
 import { ipcMain } from 'electron'
 import { IPC } from '@shared/ipc'
-import type { AppSettings } from '@shared/types'
+import type { AppSettings, AttentionSummary } from '@shared/types'
 import type { AppServices } from './services'
 import type { TerminalService } from './terminal'
 import type { FileService } from './files'
+import { captureScreenshot } from './screenshot'
 import type { FileContext } from '@shared/types'
 
 function requireString(value: unknown, label: string): string {
@@ -17,8 +18,30 @@ export function registerIpc(
   services: AppServices,
   terminal: TerminalService,
   files: FileService,
-  onSettingsChanged?: (settings: AppSettings) => void
+  onSettingsChanged?: (settings: AppSettings) => void,
+  onScreenshotCaptured?: () => void,
+  onAttentionChanged?: (summary: AttentionSummary) => void
 ): void {
+  ipcMain.handle(IPC.attentionUpdate, (_event, summary: unknown) => {
+    if (!summary || typeof summary !== 'object') throw new Error('非法提示参数')
+    const value = summary as Record<string, unknown>
+    const total = value.total
+    const completed = value.completed
+    const approval = value.approval
+    if (![total, completed, approval].every((count) =>
+      typeof count === 'number' && Number.isInteger(count) && count >= 0 && count <= 999
+    )) throw new Error('非法提示参数')
+    onAttentionChanged?.({
+      total: Math.min(total as number, (completed as number) + (approval as number)),
+      completed: completed as number,
+      approval: approval as number
+    })
+  })
+  ipcMain.handle(IPC.screenshotCapture, async (_event, context: FileContext) => {
+    const attachments = await captureScreenshot(context, files)
+    onScreenshotCaptured?.()
+    return attachments
+  })
   ipcMain.handle(IPC.attachmentsPick, (_event, context: FileContext) => files.pick(context))
   ipcMain.handle(IPC.attachmentsAdd, (_event, context: FileContext, paths: unknown) => files.add(context, paths))
   ipcMain.handle(IPC.attachmentsPaste, (_event, context: FileContext) => files.paste(context))
@@ -32,6 +55,10 @@ export function registerIpc(
 
   ipcMain.handle(IPC.sessionDetail, (_event, key: unknown) =>
     services.getDetail(requireString(key, 'sessionKey'))
+  )
+
+  ipcMain.handle(IPC.sessionUsage, (_event, key: unknown) =>
+    services.getUsage(requireString(key, 'sessionKey'))
   )
 
   ipcMain.handle(IPC.sessionHistoryDetail, (_event, key: unknown) =>

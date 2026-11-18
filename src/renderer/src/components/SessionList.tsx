@@ -1,4 +1,4 @@
-import { Folder, Star, Trash2 } from 'lucide-react'
+import { Archive, Copy, Folder, Star, Trash2 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { SessionSummary } from '@shared/types'
@@ -53,6 +53,8 @@ export default function SessionList({ embedded = false, listView }: SessionListP
   const currentView = useStore((state) => state.view)
   const view = listView ?? currentView
   const selectedKey = useStore((state) => state.selectedKey)
+  const archived = useStore((state) => state.archived)
+  const toggleSessionArchive = useStore((state) => state.toggleSessionArchive)
   const selectSession = useStore((state) => state.selectSession)
   const setView = useStore((state) => state.setView)
   const openTerminalDialog = useStore((state) => state.openTerminalDialog)
@@ -72,12 +74,15 @@ export default function SessionList({ embedded = false, listView }: SessionListP
   const selectAllRef = useRef<HTMLInputElement>(null)
   const activeRowRef = useRef<HTMLDivElement>(null)
 
-  const sessions = snapshot ? filterSessions(snapshot.sessions, view) : []
+  const sessions = snapshot ? filterSessions(snapshot.sessions, view, new Set(archived)) : []
   const shownCount = embedded
     ? Math.max(visibleCount, sessions.findIndex((session) => session.key === selectedKey) + 1)
     : sessions.length
   const projects = snapshot?.projects ?? []
   const projectMap = new Map(projects.map((item) => [item.key, item]))
+  const contextSession = contextMenu
+    ? snapshot?.sessions.find((session) => session.key === contextMenu.key)
+    : undefined
   const showProjectBadge =
     view.type === 'all' ||
     view.type === 'favorites' ||
@@ -106,17 +111,31 @@ export default function SessionList({ embedded = false, listView }: SessionListP
     const row = activeRowRef.current
     if (!row) return
     const rail = row.closest<HTMLElement>('.rail')
-    if (!rail) { row.scrollIntoView({ block: 'nearest' }); return }
+    const list = row.closest<HTMLElement>('.embedded-sessions .session-list')
+    if (!rail && !list) {
+      row.scrollIntoView({ block: 'nearest' })
+      return
+    }
     const reveal = (): void => {
       if (!row.isConnected) return
-      const item = row.getBoundingClientRect()
-      const box = rail.getBoundingClientRect()
-      if (item.bottom > box.bottom - 8) rail.scrollTop += item.bottom - box.bottom + 8
-      else if (item.top < box.top + 8) rail.scrollTop -= box.top + 8 - item.top
+      if (list) {
+        const item = row.getBoundingClientRect()
+        const box = list.getBoundingClientRect()
+        if (item.bottom > box.bottom - 6) list.scrollTop += item.bottom - box.bottom + 6
+        else if (item.top < box.top + 6) list.scrollTop -= box.top + 6 - item.top
+      }
+      if (rail) {
+        const target = list ?? row
+        const item = target.getBoundingClientRect()
+        const box = rail.getBoundingClientRect()
+        if (item.bottom > box.bottom - 8) rail.scrollTop += item.bottom - box.bottom + 8
+        else if (item.top < box.top + 8) rail.scrollTop -= box.top + 8 - item.top
+      }
     }
     reveal()
     const observer = new ResizeObserver(reveal)
-    observer.observe(rail)
+    if (list) observer.observe(list)
+    if (rail) observer.observe(rail)
     const frame = requestAnimationFrame(reveal)
     return () => { observer.disconnect(); cancelAnimationFrame(frame) }
   }, [selectedKey, view.type, 'projectKey' in view ? view.projectKey : null])
@@ -257,7 +276,7 @@ export default function SessionList({ embedded = false, listView }: SessionListP
               event.preventDefault()
               setContextMenu({ key: session.key,
                 x: Math.max(4, Math.min(event.clientX, window.innerWidth - 194)),
-                y: Math.max(4, Math.min(event.clientY, window.innerHeight - 90)) })
+                y: Math.max(4, Math.min(event.clientY, window.innerHeight - 170)) })
             }}
             onKeyDown={(event) => {
               if (event.target !== event.currentTarget) return
@@ -366,6 +385,30 @@ export default function SessionList({ embedded = false, listView }: SessionListP
         <div className="menu session-context-menu" role="menu" ref={menuRef}
           style={{ position: 'fixed', left: contextMenu.x, top: contextMenu.y, width: 190, zIndex: 45 }}>
           <button role="menuitem" onClick={() => { selectSession(contextMenu.key); setContextMenu(null) }}>查看会话记录</button>
+          <button role="menuitem" disabled={!contextSession?.projectPath || !contextSession.cwdExists} onClick={() => {
+            if (!contextSession?.projectPath) return
+            openTerminalDialog({
+              kind: 'fork',
+              cwd: contextSession.projectPath,
+              projectName: projectNameOf(contextSession.projectPath, contextSession.projectKey, projects),
+              sessionId: contextSession.id,
+              sessionTitle: contextSession.title
+            })
+            setContextMenu(null)
+          }}>
+            <Copy size={14} />
+            复制并继续
+          </button>
+          <button role="menuitem" onClick={() => {
+            const target = contextSession
+            if (!target) return
+            toggleSessionArchive(target.id)
+            if (selectedKey === target.key && currentView.type !== 'archived') selectSession(null)
+            setContextMenu(null)
+          }}>
+            <Archive size={14} />
+            {currentView.type === 'archived' ? '取消归档' : '归档会话'}
+          </button>
           <button role="menuitem" className="danger" disabled={deleting} onClick={() => {
             setPendingDelete([contextMenu.key]); setContextMenu(null)
           }}><Trash2 size={14} />删除会话</button>

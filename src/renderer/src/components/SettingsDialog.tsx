@@ -129,6 +129,22 @@ export default function SettingsDialog(): React.JSX.Element | null {
           </span>
         </label>
 
+        <label className="settings-check">
+          <input
+            type="checkbox"
+            checked={draft.desktopNotifications}
+            onChange={(event) =>
+              update('desktopNotifications', event.target.checked)
+            }
+          />
+          <span>
+            <strong>对话需要你时发送系统通知</strong>
+            <small>
+              窗口不在前台时，Claude 完成回复或等待审批会发送 Windows 通知；点击通知可回到对应对话。
+            </small>
+          </span>
+        </label>
+
         <label className="settings-field">
           <span>主题</span>
           <select

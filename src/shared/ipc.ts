@@ -2,6 +2,7 @@ export const IPC = {
   snapshotGet: 'snapshot:get',
   snapshotRefresh: 'snapshot:refresh',
   sessionDetail: 'session:detail',
+  sessionUsage: 'session:usage',
   sessionHistoryDetail: 'session:history-detail',
   sessionSearch: 'session:search',
   sessionFavorite: 'session:favorite',
@@ -29,6 +30,11 @@ export const IPC = {
   terminalStop: 'terminal:stop',
   terminalData: 'terminal:data',
   terminalExit: 'terminal:exit',
+  terminalActivity: 'terminal:activity',
+  focusSession: 'terminal:focus-session',
+  screenshotCapture: 'screenshot:capture',
+  screenshotTrigger: 'screenshot:trigger',
+  attentionUpdate: 'attention:update',
   settingsUpdate: 'settings:update',
   dataChanged: 'data:changed'
 } as const

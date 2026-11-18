@@ -42,13 +42,16 @@ function formatFull(timestamp: number): string {
 
 export default function MessageStream({
   detail,
-  matchUuid
+  matchUuid,
+  focusUuid = null
 }: {
   detail: SessionDetail
   matchUuid: string | null
+  focusUuid?: string | null
 }): React.JSX.Element {
+  const targetUuid = focusUuid ?? matchUuid
   const [start, setStart] = useState(() =>
-    initialStart(detail.events.length, detail.events, matchUuid)
+    initialStart(detail.events.length, detail.events, targetUuid)
   )
   const [highlight, setHighlight] = useState<string | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
@@ -59,22 +62,31 @@ export default function MessageStream({
   }, [detail.key, detail.events, matchUuid])
 
   useEffect(() => {
+    if (!targetUuid) return
+    const index = detail.events.findIndex((event) => event.uuid === targetUuid)
+    if (index < 0) return
+    setStart((current) => index < current ? Math.max(0, index - 50) : current)
+  }, [detail.events, targetUuid])
+
+  useEffect(() => {
     const container = containerRef.current
     if (!container) return undefined
-    if (matchUuid) {
-      const target = container.querySelector<HTMLElement>(
-        `[data-uuid="${CSS.escape(matchUuid)}"]`
-      )
-      if (target) {
-        target.scrollIntoView({ block: 'center' })
-        setHighlight(matchUuid)
-        const timer = setTimeout(() => setHighlight(null), 2000)
-        return () => clearTimeout(timer)
-      }
+    if (targetUuid) {
+      const timer = requestAnimationFrame(() => {
+        const target = container.querySelector<HTMLElement>(
+          `[data-uuid="${CSS.escape(targetUuid)}"]`
+        )
+        if (target) {
+          target.scrollIntoView({ block: 'center' })
+          setHighlight(targetUuid)
+          window.setTimeout(() => setHighlight(null), 2000)
+        }
+      })
+      return () => cancelAnimationFrame(timer)
     }
     container.scrollTop = container.scrollHeight
     return undefined
-  }, [detail.key, matchUuid])
+  }, [detail.key, targetUuid, start])
 
   const events = detail.events.slice(start)
   const context = { sessionKey: detail.key }
@@ -118,6 +130,8 @@ export default function MessageStream({
             </div>
           )
         }
+
+        if (event.kind === 'assistant' && !event.text.trim()) return null
 
         return (
           <div

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import PanelResizer from './components/PanelResizer'
+import CommandPalette from './components/CommandPalette'
 import ProjectRail from './components/ProjectRail'
 import SearchResults from './components/SearchResults'
 import SettingsDialog from './components/SettingsDialog'
@@ -9,8 +10,10 @@ import Toast from './components/Toast'
 import TopBar from './components/TopBar'
 import WorkspacePane from './components/WorkspacePane'
 import { loadSnapshot, refreshSnapshot } from './lib/actions'
+import { saveOpenTabs } from './lib/openTabs'
 import { useStore } from './store'
 import { fitPanelWidths } from './lib/panelLayout'
+import { DEFAULT_RAIL_WIDTH } from './lib/preferences'
 
 export default function App(): React.JSX.Element {
   const snapshot = useStore((state) => state.snapshot)
@@ -31,7 +34,11 @@ export default function App(): React.JSX.Element {
   const sessionListWidth = useStore((state) => state.sessionListWidth)
   const setLeftRailWidth = useStore((state) => state.setLeftRailWidth)
   const setSessionListWidth = useStore((state) => state.setSessionListWidth)
+  const terminals = useStore((state) => state.terminals)
+  const activeTab = useStore((state) => state.activeTab)
+  const attention = useStore((state) => state.attention)
   const [viewportWidth, setViewportWidth] = useState(window.innerWidth)
+  const [paletteOpen, setPaletteOpen] = useState(false)
   const showSearchResults = Boolean(query.trim()) && !sessionListCollapsed
   const fitted = fitPanelWidths(viewportWidth, leftRailWidth, sessionListWidth,
     leftRailCollapsed, !showSearchResults)
@@ -43,12 +50,27 @@ export default function App(): React.JSX.Element {
   }, [])
 
   useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === 'p') {
+        event.preventDefault()
+        setPaletteOpen(true)
+      }
+    }
+    window.addEventListener('keydown', onKeyDown, true)
+    return () => window.removeEventListener('keydown', onKeyDown, true)
+  }, [])
+
+  useEffect(() => {
     if (theme === 'system') {
       delete document.documentElement.dataset.theme
     } else {
       document.documentElement.dataset.theme = theme
     }
   }, [theme])
+
+  useEffect(() => {
+    saveOpenTabs(terminals)
+  }, [terminals])
 
   useEffect(() => {
     if (
@@ -67,6 +89,89 @@ export default function App(): React.JSX.Element {
     })
     return unsubscribe
   }, [])
+
+  useEffect(() => {
+    const offActivity = window.api.onTerminalActivity((event) => {
+      if (!event.sessionId) return
+      const state = useStore.getState()
+      state.setTerminalActivity(event.sessionId, event.activity)
+      if (event.activity === 'working') {
+        state.setAttention(event.sessionId, null)
+      } else {
+        const viewing = document.hasFocus() &&
+          state.terminals.some((tab) => tab.key === state.activeTab && tab.sessionId === event.sessionId)
+        if (!viewing) {
+          state.setAttention(event.sessionId, event.activity === 'approval' ? 'approval' : 'completed')
+        }
+      }
+    })
+    const offFocus = window.api.onFocusSession((sessionId) => {
+      const state = useStore.getState()
+      const tab = [...state.terminals].reverse().find((item) => item.sessionId === sessionId)
+      if (tab) state.setActiveTerminal(tab.key)
+    })
+    const offScreenshot = window.api.onScreenshotTrigger(() => {
+      const state = useStore.getState()
+      const active = state.terminals.find((item) => item.key === state.activeTab)
+      const tab = active?.sessionId
+        ? active
+        : [...state.terminals].reverse().find((item) => item.sessionId)
+      if (!tab?.sessionId) {
+        state.showToast({ kind: 'error', message: '请先打开一个运行中的对话再截图' })
+        return
+      }
+      const sessionId = tab.sessionId
+      void window.api.captureScreenshot({ sessionId }).then((attachments) => {
+        if (!attachments.length) return
+        window.dispatchEvent(new CustomEvent('csm:attachments-added', {
+          detail: { sessionId, attachments }
+        }))
+        state.showToast({ kind: 'success', message: '截图已插入当前对话' })
+      }).catch((error: unknown) => {
+        state.showToast({
+          kind: 'error',
+          message: `截图失败：${error instanceof Error ? error.message : String(error)}`
+        })
+      })
+    })
+    return () => {
+      offActivity()
+      offFocus()
+      offScreenshot()
+    }
+  }, [])
+
+  useEffect(() => {
+    const state = useStore.getState()
+    const tab = state.terminals.find((item) => item.key === state.activeTab)
+    if (tab?.sessionId) state.setAttention(tab.sessionId, null)
+  }, [activeTab])
+
+  useEffect(() => {
+    const state = useStore.getState()
+    if (state.activeTab !== 'record' || !state.selectedKey) return
+    const session = state.snapshot?.sessions.find((item) => item.key === state.selectedKey)
+    if (session) state.setAttention(session.id, null)
+  }, [activeTab, selectedKey])
+
+  useEffect(() => {
+    const clearActive = (): void => {
+      const state = useStore.getState()
+      const tab = state.terminals.find((item) => item.key === state.activeTab)
+      if (tab?.sessionId) state.setAttention(tab.sessionId, null)
+    }
+    window.addEventListener('focus', clearActive)
+    return () => window.removeEventListener('focus', clearActive)
+  }, [])
+
+  useEffect(() => {
+    const values = Object.values(attention)
+    void window.api.updateAttention({
+      total: values.length,
+      completed: values.filter((kind) => kind === 'completed').length,
+      approval: values.filter((kind) => kind === 'approval').length
+    }).catch(() => undefined)
+  }, [attention])
 
   useEffect(() => {
     if (
@@ -172,7 +277,7 @@ export default function App(): React.JSX.Element {
                   viewportWidth - fitted.list - 308
                 )
               )}
-              defaultValue={320}
+              defaultValue={DEFAULT_RAIL_WIDTH}
               onChange={setLeftRailWidth}
             />
           </>
@@ -199,6 +304,7 @@ export default function App(): React.JSX.Element {
       </div>
       <TerminalStartDialog />
       <SettingsDialog />
+      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
       <Toast />
     </div>
   )

@@ -30,18 +30,22 @@ export default function TerminalStartDialog(): React.JSX.Element | null {
   if (!request) return null
 
   const title =
-    request.kind === 'resume'
-      ? '在应用内恢复对话'
-      : request.kind === 'new-project'
-        ? '在新项目文件夹中新建对话'
-        : '在项目内新建对话'
+    request.kind === 'fork'
+      ? '复制并继续（分叉对话）'
+      : request.kind === 'resume'
+        ? '在应用内恢复对话'
+        : request.kind === 'new-project'
+          ? '在新项目文件夹中新建对话'
+          : '在项目内新建对话'
 
   const description =
-    request.kind === 'resume'
-      ? `恢复会话：${request.sessionTitle ?? request.projectName}`
-      : request.kind === 'new-project'
-        ? `新项目：${request.projectName}`
-        : `项目：${request.projectName}`
+    request.kind === 'fork'
+      ? `从会话「${request.sessionTitle ?? request.projectName}」创建副本，原会话不受影响`
+      : request.kind === 'resume'
+        ? `恢复会话：${request.sessionTitle ?? request.projectName}`
+        : request.kind === 'new-project'
+          ? `新项目：${request.projectName}`
+          : `项目：${request.projectName}`
 
   return (
     <div className="overlay" onMouseDown={closeDialog}>
@@ -57,6 +61,11 @@ export default function TerminalStartDialog(): React.JSX.Element | null {
         {request.kind === 'new-project' && (
           <p className="dialog-hint">
             发送第一条消息后，这个项目会自动出现在左侧项目列表。
+          </p>
+        )}
+        {request.kind === 'fork' && (
+          <p className="dialog-hint">
+            会创建新的会话 ID 并保留原会话上下文；原会话和它的终端不会受影响。
           </p>
         )}
         <p className="dialog-hint">
@@ -90,6 +99,22 @@ export default function TerminalStartDialog(): React.JSX.Element | null {
           <button
             className="btn primary"
             onClick={() => {
+              if (request.kind === 'fork') {
+                if (!request.sessionId) return
+                startTerminal({
+                  key: `fork-${request.sessionId}-${Date.now()}`,
+                  cwd: request.cwd,
+                  projectName: request.projectName,
+                  sessionId: crypto.randomUUID(),
+                  forkFromSessionId: request.sessionId,
+                  sessionTitle: request.sessionTitle
+                    ? `${request.sessionTitle} · 副本`
+                    : '副本对话',
+                  kind: 'fork',
+                  mode
+                })
+                return
+              }
               startTerminal({
                 key: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
                 cwd: request.cwd,
@@ -101,7 +126,7 @@ export default function TerminalStartDialog(): React.JSX.Element | null {
               })
             }}
           >
-            开始对话
+            {request.kind === 'fork' ? '创建副本' : '开始对话'}
           </button>
         </div>
       </div>

@@ -3,35 +3,53 @@ import type { SessionSummary } from '@shared/types'
 export type View =
   | { type: 'all' }
   | { type: 'favorites' }
+  | { type: 'archived' }
   | { type: 'history' }
   | { type: 'history-project'; projectKey: string }
   | { type: 'project'; projectKey: string }
 
 export function filterSessions(
   sessions: SessionSummary[],
-  view: View
+  view: View,
+  archivedIds: ReadonlySet<string> = new Set()
 ): SessionSummary[] {
+  const archived = (session: SessionSummary): boolean => archivedIds.has(session.id) || archivedIds.has(session.key)
   const base =
-    view.type === 'favorites'
-      ? sessions.filter((session) => session.favorite)
-      : view.type === 'history'
-        ? sessions.filter((session) => session.source === 'history')
-        : view.type === 'history-project'
-          ? sessions.filter(
-              (session) =>
-                session.source === 'history' &&
-                session.projectKey === view.projectKey
-            )
-          : view.type === 'project'
+    view.type === 'archived'
+      ? sessions.filter((session) => session.source === 'transcript' && archived(session))
+      : view.type === 'favorites'
+        ? sessions.filter((session) => session.favorite && !archived(session))
+        : view.type === 'history'
+          ? sessions.filter((session) => session.source === 'history')
+          : view.type === 'history-project'
             ? sessions.filter(
                 (session) =>
-                  session.source === 'transcript' &&
+                  session.source === 'history' &&
                   session.projectKey === view.projectKey
               )
-            : sessions.filter((session) => session.source === 'transcript')
+            : view.type === 'project'
+              ? sessions.filter(
+                  (session) =>
+                    session.source === 'transcript' &&
+                    session.projectKey === view.projectKey &&
+                    !archived(session)
+                )
+              : sessions.filter((session) => session.source === 'transcript' && !archived(session))
   return [...base].sort(
     (a, b) => b.updatedAt - a.updatedAt || a.key.localeCompare(b.key)
   )
+}
+
+export function isProjectExpanded(
+  view: View,
+  sessionListCollapsed: boolean,
+  expandedProjectKeys: readonly string[],
+  projectKey: string
+): boolean {
+  return view.type === 'project' &&
+    view.projectKey === projectKey &&
+    !sessionListCollapsed &&
+    expandedProjectKeys.includes(projectKey)
 }
 
 function sameDate(a: Date, b: Date): boolean {

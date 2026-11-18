@@ -13,6 +13,7 @@ export type SessionClickAction = 'continue' | 'record'
 export interface AppSettings {
   loadHistory: boolean
   minimizeToTray: boolean
+  desktopNotifications: boolean
   theme: AppTheme
   defaultPermissionMode: TerminalPermissionMode
   terminalFontSize: number
@@ -22,6 +23,7 @@ export interface AppSettings {
 export const DEFAULT_APP_SETTINGS: AppSettings = {
   loadHistory: false,
   minimizeToTray: true,
+  desktopNotifications: true,
   theme: 'system',
   defaultPermissionMode: 'follow',
   terminalFontSize: 13,
@@ -32,9 +34,25 @@ export interface TerminalStartOptions {
   cwd: string
   sessionId?: string | null
   newSessionId?: string
+  forkFromSessionId?: string
+  title?: string
   mode: TerminalPermissionMode
   cols: number
   rows: number
+}
+
+export type TerminalActivity = 'working' | 'idle' | 'approval'
+
+export interface TerminalActivityEvent {
+  ptyId: string
+  sessionId: string | null
+  activity: TerminalActivity
+}
+
+export interface AttentionSummary {
+  total: number
+  completed: number
+  approval: number
 }
 
 export interface TerminalStartResult {
@@ -118,6 +136,14 @@ export interface Snapshot {
   settings: AppSettings
 }
 
+export type TodoStatus = 'pending' | 'in_progress' | 'completed'
+
+export interface TodoItem {
+  content: string
+  status: TodoStatus
+  activeForm?: string
+}
+
 export interface ToolCall {
   id: string
   name: string
@@ -127,6 +153,7 @@ export interface ToolCall {
   isError?: boolean
   persistedOutputPath?: string
   files?: string[]
+  todos?: TodoItem[]
 }
 
 export interface FileContext {
@@ -148,9 +175,24 @@ export interface ClipboardPaste {
   text?: string
 }
 
+export interface TokenUsage {
+  inputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  cacheWriteTokens: number
+}
+
+export interface SessionUsage extends TokenUsage {
+  costUSD: number | null
+  contextTokens: number
+  contextLimit: number | null
+  contextPercent: number | null
+  model?: string
+}
+
 export type SessionEvent =
   | { kind: 'user'; uuid: string; timestamp: number; text: string }
-  | { kind: 'assistant'; uuid: string; timestamp: number; text: string; model?: string }
+  | { kind: 'assistant'; uuid: string; timestamp: number; text: string; model?: string; usage?: TokenUsage }
   | { kind: 'tools'; uuid: string; timestamp: number; calls: ToolCall[] }
 
 export interface SessionDetail {
@@ -207,6 +249,7 @@ export interface ClaudeViewApi {
   getSnapshot(): Promise<Snapshot>
   refresh(): Promise<Snapshot>
   getSessionDetail(sessionKey: string): Promise<SessionDetail>
+  getSessionUsage(sessionKey: string): Promise<SessionUsage | null>
   getHistoryDetail(sessionKey: string): Promise<HistoryDetail>
   search(query: string, requestId: number): Promise<SearchResponse>
   setFavorite(sessionKey: string, favorite: boolean): Promise<string[]>
@@ -227,6 +270,11 @@ export interface ClaudeViewApi {
   stopTerminal(ptyId: string): Promise<void>
   onTerminalData(callback: (event: TerminalDataEvent) => void): () => void
   onTerminalExit(callback: (event: TerminalExitEvent) => void): () => void
+  onTerminalActivity(callback: (event: TerminalActivityEvent) => void): () => void
+  onFocusSession(callback: (sessionId: string) => void): () => void
+  captureScreenshot(context: FileContext): Promise<Attachment[]>
+  onScreenshotTrigger(callback: () => void): () => void
+  updateAttention(summary: AttentionSummary): Promise<void>
   updateSettings(patch: Partial<AppSettings>): Promise<AppSettings>
   onDataChanged(callback: () => void): () => void
 }

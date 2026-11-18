@@ -6,11 +6,13 @@ import { execFile, execFileSync } from 'node:child_process'
 import { spawn, type IPty } from 'node-pty'
 import type { BrowserWindow } from 'electron'
 import type {
+  TerminalActivityEvent,
   TerminalExitEvent,
   TerminalStartOptions,
   TerminalStartResult
 } from '@shared/types'
 import { IPC } from '@shared/ipc'
+import { TerminalActivityTracker } from './terminalActivity'
 import {
   buildClaudeLaunch,
   CLAUDE_CLI_HINT,
@@ -98,6 +100,8 @@ export function terminalEnv(): Record<string, string> {
 export class TerminalService {
   private readonly sessions = new Map<string, IPty>()
   private readonly sessionIds = new Map<string, string>()
+  private readonly activities = new Map<string, TerminalActivityTracker>()
+  private readonly titles = new Map<string, string>()
   private readonly stopping = new Map<string, Promise<void>>()
   private readonly fileContexts = new Map<string, FileScope>()
 
@@ -105,7 +109,10 @@ export class TerminalService {
     return this.fileContexts.get(sessionId)
   }
 
-  constructor(private readonly getWindow: () => BrowserWindow | null) {}
+  constructor(
+    private readonly getWindow: () => BrowserWindow | null,
+    private readonly onActivity?: (event: TerminalActivityEvent & { title: string }) => void
+  ) {}
 
   private send(channel: string, payload: unknown): void {
     const window = this.getWindow()
@@ -164,11 +171,25 @@ export class TerminalService {
       const sessionId = options.sessionId ?? options.newSessionId
       if (sessionId) this.sessionIds.set(ptyId, sessionId)
       if (sessionId) this.fileContexts.set(sessionId, { sessionId, cwd })
+      if (options.title) this.titles.set(ptyId, options.title)
+      if (sessionId) {
+        this.activities.set(ptyId, new TerminalActivityTracker({
+          onChange: (activity) => {
+            const event: TerminalActivityEvent = { ptyId, sessionId, activity }
+            this.send(IPC.terminalActivity, event)
+            this.onActivity?.({ ...event, title: this.titles.get(ptyId) ?? 'Claude 对话' })
+          }
+        }))
+      }
 
       child.onData((data) => {
+        this.activities.get(ptyId)?.push(data)
         this.send(IPC.terminalData, { ptyId, data })
       })
       child.onExit(({ exitCode, signal }) => {
+        this.activities.get(ptyId)?.dispose()
+        this.activities.delete(ptyId)
+        this.titles.delete(ptyId)
         this.sessions.delete(ptyId)
         this.sessionIds.delete(ptyId)
         const event: TerminalExitEvent = { ptyId, exitCode, signal }
@@ -192,6 +213,7 @@ export class TerminalService {
     if (data.length > 1024 * 1024) throw new Error('终端输入过大')
     const child = this.sessions.get(ptyId)
     if (!child) throw new Error('终端不存在或已结束')
+    this.activities.get(ptyId)?.noteInput(data)
     child.write(data)
   }
 
@@ -229,6 +251,9 @@ export class TerminalService {
       }).then(() => {
         if (this.sessions.delete(ptyId)) this.send(IPC.terminalExit, { ptyId, exitCode: 0 })
         this.sessionIds.delete(ptyId)
+        this.activities.get(ptyId)?.dispose()
+        this.activities.delete(ptyId)
+        this.titles.delete(ptyId)
       }).finally(() => this.stopping.delete(ptyId))
       this.stopping.set(ptyId, operation)
       return operation
@@ -236,6 +261,9 @@ export class TerminalService {
       child.kill()
       this.sessions.delete(ptyId)
       this.sessionIds.delete(ptyId)
+      this.activities.get(ptyId)?.dispose()
+      this.activities.delete(ptyId)
+      this.titles.delete(ptyId)
     }
   }
 
@@ -259,5 +287,8 @@ export class TerminalService {
     this.sessions.clear()
     this.sessionIds.clear()
     this.fileContexts.clear()
+    for (const tracker of this.activities.values()) tracker.dispose()
+    this.activities.clear()
+    this.titles.clear()
   }
 }
