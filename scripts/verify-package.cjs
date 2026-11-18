@@ -34,7 +34,7 @@ const code = `
   }
   setTimeout(() => process.exit(2), 12000);
 `
-const result = spawnSync(path.join(root, 'dist/win-unpacked/Claude 会话管理器.exe'), ['-e', code], {
+const result = spawnSync(path.join(root, 'dist/win-unpacked/Claude Session Desk.exe'), ['-e', code], {
   cwd: root, env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, encoding: 'utf8', windowsHide: true, timeout: 15000
 })
 process.stdout.write(result.stdout || '')

@@ -22,7 +22,7 @@ git diff --cached --stat
 node scripts/prepare-open-source.cjs
 ```
 
-压缩包位于 `release-source/claude-session-desk-1.1.3-source.zip`，清单和 SHA256 位于同目录的 `source-manifest.json`。导出内容来自 Git 暂存区；修改源码后先 `git add`，再重新导出。检查脚本只报告问题类型、文件和行号，不打印可能的凭据内容。该检查是发布辅助，不替代人工复查。
+压缩包位于 `release-source/claude-session-desk-1.1.5-source.zip`，清单和 SHA256 位于同目录的 `source-manifest.json`。导出内容来自 Git 暂存区；修改源码后先 `git add`，再重新导出。检查脚本只报告问题类型、文件和行号，不打印可能的凭据内容。该检查是发布辅助，不替代人工复查。
 
 ## 1. 登录方式
 
@@ -105,12 +105,12 @@ node scripts/verify-package.cjs
 ```powershell
 $releaseVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
 $releaseFiles = @(
-  "dist/ClaudeSessionManager-$releaseVersion-portable.exe",
-  "dist/ClaudeSessionManager-$releaseVersion-setup.exe"
+  "dist/ClaudeSessionDesk-$releaseVersion-portable.exe",
+  "dist/ClaudeSessionDesk-$releaseVersion-setup.exe"
 )
 Get-FileHash -LiteralPath $releaseFiles -Algorithm SHA256 |
   ForEach-Object { '{0}  {1}' -f $_.Hash, (Split-Path $_.Path -Leaf) } |
-  Set-Content "dist/ClaudeSessionManager-$releaseVersion-SHA256.txt" -Encoding ascii
+  Set-Content "dist/ClaudeSessionDesk-$releaseVersion-SHA256.txt" -Encoding ascii
 ```
 
 将最新源码和依赖声明提交并推送后，创建首个版本标签与草稿 Release：
@@ -119,10 +119,10 @@ Get-FileHash -LiteralPath $releaseFiles -Algorithm SHA256 |
 git add .
 git commit -m "Prepare public release"
 git push
-git tag v1.1.3
-git push origin v1.1.3
-gh release create v1.1.3 --draft --verify-tag --title "Claude Session Desk 1.1.3" --notes-file docs/release-1.1.3.md
-gh release upload v1.1.3 dist/ClaudeSessionManager-1.1.3-portable.exe dist/ClaudeSessionManager-1.1.3-setup.exe dist/ClaudeSessionManager-1.1.3-SHA256.txt LICENSE THIRD_PARTY_NOTICES.md
+git tag v1.1.5
+git push origin v1.1.5
+gh release create v1.1.5 --draft --verify-tag --title "Claude Session Desk 1.1.5" --notes-file docs/release-1.1.5.md
+gh release upload v1.1.5 dist/ClaudeSessionDesk-1.1.5-portable.exe dist/ClaudeSessionDesk-1.1.5-setup.exe dist/ClaudeSessionDesk-1.1.5-SHA256.txt LICENSE THIRD_PARTY_NOTICES.md
 ```
 
 如果没有新改动，则跳过第二次 `git commit`。在 GitHub Release 草稿页复核附件、说明和校验值，再发布。已公开的 tag 和附件建议保持不变；以后修复递增版本号，避免同版本不同内容。
