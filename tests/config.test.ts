@@ -143,6 +143,19 @@ describe('ConfigStore', () => {
     expect((await config.readSettings()).desktopNotifications).toBe(false)
   })
 
+  it('defaults terminal copy-on-select and right-click paste on and persists opt-outs', async () => {
+    const { config } = await store()
+    expect(await config.readSettings()).toMatchObject({
+      terminalCopyOnSelect: true,
+      terminalRightClickPaste: true
+    })
+    await config.updateSettings({ terminalCopyOnSelect: false, terminalRightClickPaste: false })
+    expect(await config.readSettings()).toMatchObject({
+      terminalCopyOnSelect: false,
+      terminalRightClickPaste: false
+    })
+  })
+
   it('round-trips the metadata cache and ignores corrupt cache data', async () => {
     const { dir, config } = await store()
     const cache = {

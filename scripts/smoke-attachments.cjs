@@ -24,19 +24,36 @@ module.exports = async ({ win, dir, projectDir, sessionId, configDir, js, until,
     win.webContents.send('terminal:activity', { ptyId, sessionId, activity: 'approval' })
     await until(() => js(`document.querySelector('.terminal-tab-view.active .terminal-status')?.textContent.includes('等待确认')`), 'approval activity status')
     assert(await js(`Boolean(document.querySelector('.terminal-tab-view.active .terminal-status.approval'))`))
+    assert(await js(`document.querySelector('.terminal-tab.active .terminal-tab-letter.approval')?.textContent.trim() === 'A'`))
+    assert(await js(`Boolean(document.querySelector('.terminal-tab.active .terminal-tab-attention.approval'))`))
     win.webContents.send('terminal:activity', { ptyId, sessionId, activity: 'idle' })
     await until(() => js(`document.querySelector('.terminal-tab-view.active .terminal-status')?.textContent.includes('等待输入')`), 'idle activity status')
+    assert(await js(`document.querySelector('.terminal-tab.active .terminal-tab-letter.idle')?.textContent.trim() === 'D'`))
+    assert(await js(`Boolean(document.querySelector('.terminal-tab.active .terminal-tab-attention.completed'))`))
+    assert(await js(`document.querySelector('.terminal-tab.active .terminal-tab-project')?.textContent.trim().length > 0`))
     win.webContents.send('terminal:activity', { ptyId, sessionId, activity: 'working' })
     await until(() => js(`document.querySelector('.terminal-tab-view.active .terminal-status')?.textContent.includes('工作中')`), 'working activity status')
+    assert(await js(`document.querySelector('.terminal-tab.active .terminal-tab-letter.working')?.textContent.trim() === 'W'`))
+    assert(await js(`!document.querySelector('.terminal-tab.active .terminal-tab-attention')`))
     checks.push('Terminal activity events drive the tab status label and colour')
 
     win.webContents.send('terminal:activity', { ptyId, sessionId: 'attention-test-session', activity: 'approval' })
     await until(() => overlayCalls.some((description) => description.includes('个对话待查看')), 'taskbar attention badge')
     const attentionIndex = overlayCalls.findIndex((description) => description.includes('个对话待查看'))
     assert(overlayCalls[attentionIndex].includes('1 个对话待查看'))
-    win.webContents.send('terminal:activity', { ptyId, sessionId: 'attention-test-session', activity: 'working' })
+    await until(() => js(`document.querySelector('.attention-chip')?.textContent.includes('待查看 1')`), 'topbar attention chip')
+    await js(`document.querySelector('.attention-clear').click()`)
+    await until(() => js(`!document.querySelector('.attention-chip')`), 'topbar attention cleared')
     await until(() => overlayCalls.slice(attentionIndex + 1).some((description) => description === ''), 'taskbar attention badge cleared')
-    checks.push('Completed or approval conversations show a taskbar badge count and clear when handled')
+    checks.push('Completed or approval conversations show a taskbar badge and a topbar count that can be cleared at once')
+
+    clipboard.read = async () => []
+    clipboard.readText = async () => 'right click paste'
+    await js(`document.querySelector('.terminal-tab-view.active .terminal-body').dispatchEvent(new MouseEvent('contextmenu', {
+      bubbles: true, cancelable: true, clientX: 320, clientY: 240
+    }))`)
+    await until(() => written.some(item => item.data.includes('right click paste')), 'right-click paste')
+    checks.push('Right-click pastes clipboard text into the terminal')
     await until(() => js(`localStorage.getItem('csm.openTabs')?.includes('${sessionId}')`), 'open tabs persisted')
 
     const png = await readFile(join(__dirname, '../build/icon.png'))

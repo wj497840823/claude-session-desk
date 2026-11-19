@@ -140,6 +140,7 @@ interface AppState {
   leftRailWidth: number
   sessionListWidth: number
   settingsOpen: boolean
+  scheduledTasksOpen: boolean
   setSnapshot: (snapshot: Snapshot) => void
   setLoading: (loading: boolean) => void
   setRefreshing: (refreshing: boolean) => void
@@ -173,13 +174,16 @@ interface AppState {
   setActiveTerminal: (key: string) => void
   setTerminalStatus: (key: string, status: TerminalStatus) => void
   setTerminalActivity: (sessionId: string, activity: TerminalActivity) => void
+  clearTerminalActivity: (sessionId: string) => void
   setAttention: (sessionId: string, kind: AttentionKind | null) => void
+  clearAllAttention: () => void
   setTerminalFocused: (focused: boolean) => void
   toggleLeftRail: () => void
   toggleSessionList: () => void
   setLeftRailWidth: (width: number) => void
   setSessionListWidth: (width: number) => void
   setSettingsOpen: (open: boolean) => void
+  setScheduledTasksOpen: (open: boolean) => void
 }
 
 function terminalNavigation(state: AppState, terminal: TerminalSession, changeView = true): Partial<AppState> {
@@ -264,6 +268,7 @@ export const useStore = create<AppState>()((set) => ({
   leftRailWidth: storedRailWidth(),
   sessionListWidth: storedWidth('csm.sessionListWidth', 340, 240, 640),
   settingsOpen: false,
+  scheduledTasksOpen: false,
   setSnapshot: (snapshot) =>
     set((state) => {
       const active = state.terminals.find((tab) => tab.key === state.activeTab)
@@ -432,6 +437,13 @@ export const useStore = create<AppState>()((set) => ({
     set((state) => ({
       terminalActivity: { ...state.terminalActivity, [sessionId]: activity }
     })),
+  clearTerminalActivity: (sessionId) =>
+    set((state) => {
+      if (!(sessionId in state.terminalActivity)) return {}
+      const terminalActivity = { ...state.terminalActivity }
+      delete terminalActivity[sessionId]
+      return { terminalActivity }
+    }),
   setAttention: (sessionId, kind) =>
     set((state) => {
       const attention = { ...state.attention }
@@ -439,6 +451,7 @@ export const useStore = create<AppState>()((set) => ({
       else delete attention[sessionId]
       return { attention }
     }),
+  clearAllAttention: () => set({ attention: {} }),
   setTerminalFocused: (terminalFocused) => set({ terminalFocused }),
   toggleLeftRail: () =>
     set((state) => {
@@ -463,5 +476,6 @@ export const useStore = create<AppState>()((set) => ({
     rememberLater('csm.sessionListWidth', sessionListWidth)
     set({ sessionListWidth })
   },
-  setSettingsOpen: (settingsOpen) => set({ settingsOpen })
+  setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
+  setScheduledTasksOpen: (scheduledTasksOpen) => set({ scheduledTasksOpen })
 }))

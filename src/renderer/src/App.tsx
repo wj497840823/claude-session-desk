@@ -5,6 +5,7 @@ import CommandPalette from './components/CommandPalette'
 import ProjectRail from './components/ProjectRail'
 import SearchResults from './components/SearchResults'
 import SettingsDialog from './components/SettingsDialog'
+import ScheduledTasksDialog from './components/ScheduledTasksDialog'
 import TerminalStartDialog from './components/TerminalStartDialog'
 import Toast from './components/Toast'
 import TopBar from './components/TopBar'
@@ -14,6 +15,16 @@ import { saveOpenTabs } from './lib/openTabs'
 import { useStore } from './store'
 import { fitPanelWidths } from './lib/panelLayout'
 import { DEFAULT_RAIL_WIDTH } from './lib/preferences'
+
+function clearViewedAttention(): void {
+  const state = useStore.getState()
+  const tab = state.terminals.find((item) => item.key === state.activeTab)
+  if (tab?.sessionId) state.setAttention(tab.sessionId, null)
+  if (state.activeTab === 'record' && state.selectedKey) {
+    const session = state.snapshot?.sessions.find((item) => item.key === state.selectedKey)
+    if (session) state.setAttention(session.id, null)
+  }
+}
 
 export default function App(): React.JSX.Element {
   const snapshot = useStore((state) => state.snapshot)
@@ -142,26 +153,12 @@ export default function App(): React.JSX.Element {
   }, [])
 
   useEffect(() => {
-    const state = useStore.getState()
-    const tab = state.terminals.find((item) => item.key === state.activeTab)
-    if (tab?.sessionId) state.setAttention(tab.sessionId, null)
-  }, [activeTab])
-
-  useEffect(() => {
-    const state = useStore.getState()
-    if (state.activeTab !== 'record' || !state.selectedKey) return
-    const session = state.snapshot?.sessions.find((item) => item.key === state.selectedKey)
-    if (session) state.setAttention(session.id, null)
+    clearViewedAttention()
   }, [activeTab, selectedKey])
 
   useEffect(() => {
-    const clearActive = (): void => {
-      const state = useStore.getState()
-      const tab = state.terminals.find((item) => item.key === state.activeTab)
-      if (tab?.sessionId) state.setAttention(tab.sessionId, null)
-    }
-    window.addEventListener('focus', clearActive)
-    return () => window.removeEventListener('focus', clearActive)
+    window.addEventListener('focus', clearViewedAttention)
+    return () => window.removeEventListener('focus', clearViewedAttention)
   }, [])
 
   useEffect(() => {
@@ -304,6 +301,7 @@ export default function App(): React.JSX.Element {
       </div>
       <TerminalStartDialog />
       <SettingsDialog />
+      <ScheduledTasksDialog />
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
       <Toast />
     </div>

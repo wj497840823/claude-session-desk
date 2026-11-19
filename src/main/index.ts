@@ -17,6 +17,8 @@ import { ConfigStore } from './config'
 import { registerIpc } from './ipc'
 import { AppServices } from './services'
 import { TerminalService } from './terminal'
+import { HookRelayService } from './hookRelay'
+import { ScheduledTaskService } from './scheduledTasks'
 import { watchDataRoot } from './watcher'
 import { externalWebUrl } from './validation'
 import { FileService } from './files'
@@ -59,9 +61,37 @@ function notifyTerminalActivity(event: TerminalActivityEvent & { title: string }
 }
 
 const terminal = new TerminalService(() => mainWindow, notifyTerminalActivity)
+const hookRelay = new HookRelayService()
+const scheduledTasks = new ScheduledTaskService({
+  userData: app.getPath('userData'),
+  onChange: () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send(IPC.schedulesChanged)
+    }
+  },
+  resolveSession: async (sessionId) => {
+    const snapshot = await services.getSnapshot()
+    const session = snapshot.sessions.find((item) => item.id === sessionId)
+    return session
+      ? { projectPath: session.projectPath, source: session.source, cwdExists: session.cwdExists }
+      : null
+  },
+  isSessionActive: (sessionId) => terminal.hasSession(sessionId),
+  notify: (title, body) => {
+    if (!desktopNotifications || !Notification.isSupported()) return
+    try {
+      const notification = new Notification({ title, body })
+      notification.on('click', () => showMainWindow())
+      notification.show()
+    } catch {
+      // Notifications are best-effort.
+    }
+  }
+})
 const files = new FileService(app.getPath('userData'), dataRoot,
   (context) => services.getFileScope(context, context?.sessionId ? terminal.getFileContext(context.sessionId) : undefined),
   () => mainWindow)
+terminal.setScheduledSessionGuard((sessionId) => scheduledTasks.isSessionRunning(sessionId))
 let stopWatching: (() => void) | null = null
 let watchErrorNotified = false
 let tray: Tray | null = null
@@ -284,7 +314,11 @@ if (!gotSingleInstanceLock) {
     minimizeToTray = settings.minimizeToTray
     desktopNotifications = settings.desktopNotifications
     nativeTheme.themeSource = settings.theme
-    registerIpc(services, terminal, files, applySettings, showMainWindow, applyAttention)
+    registerIpc(services, terminal, files, applySettings, showMainWindow, applyAttention, scheduledTasks)
+    void hookRelay.start().then((started) => {
+      if (started) terminal.setHookRelay(hookRelay)
+    })
+    void scheduledTasks.initialize().catch(() => undefined)
     registerScreenshotShortcut()
     if (minimizeToTray) createTray()
     createWindow()
@@ -315,7 +349,9 @@ app.on('will-quit', () => {
 
 app.on('before-quit', () => {
   isQuitting = true
+  scheduledTasks.dispose()
   terminal.dispose()
+  void hookRelay.stop().catch(() => undefined)
   stopWatching?.()
   stopWatching = null
   destroyTray()

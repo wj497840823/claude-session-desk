@@ -12,7 +12,10 @@ import type {
   TerminalStartResult
 } from '@shared/types'
 import { IPC } from '@shared/ipc'
-import { TerminalActivityTracker } from './terminalActivity'
+import { TerminalActivityTracker, stripAnsi } from './terminalActivity'
+import type { TerminalActivity } from './terminalActivity'
+import { buildHookSettings, hookEventToActivity } from './hookActivity'
+import type { HookRelayLike } from './hookRelay'
 import {
   buildClaudeLaunch,
   CLAUDE_CLI_HINT,
@@ -94,6 +97,14 @@ export function terminalEnv(): Record<string, string> {
 
   env.TERM = 'xterm-256color'
   env.COLORTERM = 'truecolor'
+  // Hook relay traffic goes to loopback; never let a configured proxy carry it.
+  const existingNoProxy = env.NO_PROXY ?? env.no_proxy ?? ''
+  const noProxy = [...new Set(
+    [...existingNoProxy.split(',').map((item) => item.trim()), '127.0.0.1', 'localhost']
+      .filter(Boolean)
+  )].join(',')
+  env.NO_PROXY = noProxy
+  env.no_proxy = noProxy
   return env
 }
 
@@ -101,12 +112,30 @@ export class TerminalService {
   private readonly sessions = new Map<string, IPty>()
   private readonly sessionIds = new Map<string, string>()
   private readonly activities = new Map<string, TerminalActivityTracker>()
+  private readonly hookPhases = new Map<string, TerminalActivity>()
   private readonly titles = new Map<string, string>()
   private readonly stopping = new Map<string, Promise<void>>()
   private readonly fileContexts = new Map<string, FileScope>()
+  private hookRelay: HookRelayLike | null = null
+  private scheduledSessionGuard: ((sessionId: string) => boolean) | null = null
 
   getFileContext(sessionId: string): FileScope | undefined {
     return this.fileContexts.get(sessionId)
+  }
+
+  setHookRelay(relay: HookRelayLike | null): void {
+    this.hookRelay = relay
+  }
+
+  setScheduledSessionGuard(guard: ((sessionId: string) => boolean) | null): void {
+    this.scheduledSessionGuard = guard
+  }
+
+  hasSession(sessionId: string): boolean {
+    for (const value of this.sessionIds.values()) {
+      if (value === sessionId) return true
+    }
+    return false
   }
 
   constructor(
@@ -143,9 +172,20 @@ export class TerminalService {
       return { ok: false, message: '不能把 Claude 配置目录作为项目文件夹' }
     }
 
+    if (options.sessionId && this.scheduledSessionGuard?.(options.sessionId)) {
+      return { ok: false, message: '该会话正在被定时任务使用，请等待运行结束后再打开' }
+    }
+
+    const ptyId = randomUUID()
+    const sessionId = options.sessionId ?? options.newSessionId
+    const hookUrl = this.hookRelay?.urlFor(ptyId) ?? null
+
     let args: string[]
     try {
-      args = buildClaudeTerminalArgs(options)
+      args = buildClaudeTerminalArgs(
+        options,
+        hookUrl ? { settingsJson: JSON.stringify(buildHookSettings(hookUrl)) } : undefined
+      )
     } catch (error) {
       return { ok: false, message: errorMessage(error) }
     }
@@ -156,7 +196,9 @@ export class TerminalService {
     }
 
     try {
-      const ptyId = randomUUID()
+      if (hookUrl && sessionId) {
+        this.hookRelay?.register(ptyId, (event) => this.handleHookEvent(ptyId, sessionId, event))
+      }
       const launch = buildClaudeLaunch(launcher.command, args)
       const child = spawn(launch.file, launch.args, {
         name: 'xterm-256color',
@@ -168,7 +210,6 @@ export class TerminalService {
       })
 
       this.sessions.set(ptyId, child)
-      const sessionId = options.sessionId ?? options.newSessionId
       if (sessionId) this.sessionIds.set(ptyId, sessionId)
       if (sessionId) this.fileContexts.set(sessionId, { sessionId, cwd })
       if (options.title) this.titles.set(ptyId, options.title)
@@ -187,8 +228,7 @@ export class TerminalService {
         this.send(IPC.terminalData, { ptyId, data })
       })
       child.onExit(({ exitCode, signal }) => {
-        this.activities.get(ptyId)?.dispose()
-        this.activities.delete(ptyId)
+        this.releasePty(ptyId)
         this.titles.delete(ptyId)
         this.sessions.delete(ptyId)
         this.sessionIds.delete(ptyId)
@@ -198,6 +238,7 @@ export class TerminalService {
 
       return { ok: true, ptyId, cwd }
     } catch (error) {
+      this.releasePty(ptyId)
       const detail = errorMessage(error)
       const hint =
         /code:\s*2|ENOENT|not found/i.test(detail) ? ` ${CLAUDE_CLI_HINT}` : ''
@@ -208,12 +249,57 @@ export class TerminalService {
     }
   }
 
+  private releasePty(ptyId: string): void {
+    this.hookRelay?.unregister(ptyId)
+    this.hookPhases.delete(ptyId)
+    this.activities.get(ptyId)?.dispose()
+    this.activities.delete(ptyId)
+  }
+
+  private applyActivity(ptyId: string, sessionId: string, activity: TerminalActivity): void {
+    if (this.hookPhases.get(ptyId) === activity) return
+    this.hookPhases.set(ptyId, activity)
+    const event: TerminalActivityEvent = { ptyId, sessionId, activity }
+    this.send(IPC.terminalActivity, event)
+    this.onActivity?.({ ...event, title: this.titles.get(ptyId) ?? 'Claude 对话' })
+  }
+
+  private handleHookEvent(ptyId: string, sessionId: string, event: unknown): void {
+    const activity = hookEventToActivity(event)
+    // Only a recognized hook event proves hooks are live. An unknown or
+    // malformed payload must not disable the PTY-based fallback.
+    if (!activity) return
+    const tracker = this.activities.get(ptyId)
+    if (tracker) {
+      tracker.dispose()
+      this.activities.delete(ptyId)
+    }
+    this.applyActivity(ptyId, sessionId, activity)
+  }
+
+  private noteHookInput(ptyId: string, data: string): void {
+    const phase = this.hookPhases.get(ptyId)
+    const sessionId = this.sessionIds.get(ptyId)
+    if (!phase || !sessionId) return
+    const clean = stripAnsi(data)
+    // A bare Esc arrives as a single byte; an Esc followed by a character is
+    // an Alt/Meta shortcut and must not be mistaken for an interrupt.
+    const escape = clean === '\x1b'
+    if (phase === 'approval' && (/[\r\n]/.test(clean) || escape)) {
+      this.applyActivity(ptyId, sessionId, 'working')
+    } else if (phase === 'working' && (escape || clean.includes('\x03'))) {
+      this.applyActivity(ptyId, sessionId, 'idle')
+    }
+  }
+
   write(ptyId: string, data: unknown): void {
     if (typeof data !== 'string') throw new Error('非法终端输入')
     if (data.length > 1024 * 1024) throw new Error('终端输入过大')
     const child = this.sessions.get(ptyId)
     if (!child) throw new Error('终端不存在或已结束')
-    this.activities.get(ptyId)?.noteInput(data)
+    const tracker = this.activities.get(ptyId)
+    if (tracker) tracker.noteInput(data)
+    else this.noteHookInput(ptyId, data)
     child.write(data)
   }
 
@@ -251,8 +337,7 @@ export class TerminalService {
       }).then(() => {
         if (this.sessions.delete(ptyId)) this.send(IPC.terminalExit, { ptyId, exitCode: 0 })
         this.sessionIds.delete(ptyId)
-        this.activities.get(ptyId)?.dispose()
-        this.activities.delete(ptyId)
+        this.releasePty(ptyId)
         this.titles.delete(ptyId)
       }).finally(() => this.stopping.delete(ptyId))
       this.stopping.set(ptyId, operation)
@@ -261,8 +346,7 @@ export class TerminalService {
       child.kill()
       this.sessions.delete(ptyId)
       this.sessionIds.delete(ptyId)
-      this.activities.get(ptyId)?.dispose()
-      this.activities.delete(ptyId)
+      this.releasePty(ptyId)
       this.titles.delete(ptyId)
     }
   }
@@ -276,19 +360,21 @@ export class TerminalService {
   dispose(): void {
     for (const ptyId of [...this.sessions.keys()]) {
       const child = this.sessions.get(ptyId)
-      if (!child) continue
-      try {
-        if (process.platform === 'win32') execFileSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], {
-          stdio: 'ignore', windowsHide: true, timeout: 2000
-        })
-        else child.kill()
-      } catch { /* process may already have exited */ }
+      if (child) {
+        try {
+          if (process.platform === 'win32') execFileSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], {
+            stdio: 'ignore', windowsHide: true, timeout: 2000
+          })
+          else child.kill()
+        } catch { /* process may already have exited */ }
+      }
+      this.releasePty(ptyId)
     }
     this.sessions.clear()
     this.sessionIds.clear()
     this.fileContexts.clear()
-    for (const tracker of this.activities.values()) tracker.dispose()
     this.activities.clear()
+    this.hookPhases.clear()
     this.titles.clear()
   }
 }

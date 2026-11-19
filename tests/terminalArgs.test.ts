@@ -102,4 +102,12 @@ describe('terminalArgs', () => {
       rows: 24
     })).toThrow()
   })
+
+  it('appends an injected settings document', () => {
+    const settings = '{"hooks":{"Stop":[]}}'
+    expect(
+      buildClaudeTerminalArgs({ sessionId: SID, mode: 'follow' }, { settingsJson: settings })
+    ).toEqual(['--resume', SID, '--settings', settings])
+    expect(buildClaudeTerminalArgs({ sessionId: SID, mode: 'follow' })).toEqual(['--resume', SID])
+  })
 })

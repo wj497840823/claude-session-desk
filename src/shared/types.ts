@@ -14,6 +14,8 @@ export interface AppSettings {
   loadHistory: boolean
   minimizeToTray: boolean
   desktopNotifications: boolean
+  terminalCopyOnSelect: boolean
+  terminalRightClickPaste: boolean
   theme: AppTheme
   defaultPermissionMode: TerminalPermissionMode
   terminalFontSize: number
@@ -24,6 +26,8 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   loadHistory: false,
   minimizeToTray: true,
   desktopNotifications: true,
+  terminalCopyOnSelect: true,
+  terminalRightClickPaste: true,
   theme: 'system',
   defaultPermissionMode: 'follow',
   terminalFontSize: 13,
@@ -53,6 +57,57 @@ export interface AttentionSummary {
   total: number
   completed: number
   approval: number
+}
+
+export type ScheduleSpec =
+  | { kind: 'once'; at: number }
+  | { kind: 'daily'; time: string }
+  | { kind: 'weekly'; weekdays: number[]; time: string }
+  | { kind: 'interval'; minutes: number }
+
+export type ScheduledTaskType = 'claude' | 'command'
+export type ScheduledTaskRunStatus = 'success' | 'failed' | 'timeout' | 'cancelled'
+
+export interface ScheduledTaskRun {
+  id: string
+  startedAt: number
+  endedAt: number
+  status: ScheduledTaskRunStatus
+  exitCode?: number
+  logPath: string
+  outputTail: string
+  sessionId?: string
+}
+
+export interface ScheduledTask {
+  id: string
+  name: string
+  enabled: boolean
+  projectPath: string
+  type: ScheduledTaskType
+  prompt?: string
+  command?: string
+  permissionMode?: TerminalPermissionMode
+  model?: string
+  maxBudgetUsd?: number
+  sessionMode?: 'new' | 'resume' | 'existing'
+  resumeSessionId?: string
+  schedule: ScheduleSpec
+  createdAt: number
+  updatedAt: number
+  nextRun?: number
+  lastRun?: ScheduledTaskRun
+  running?: boolean
+}
+
+export type ScheduledTaskInput = Omit<
+  ScheduledTask,
+  'id' | 'createdAt' | 'updatedAt' | 'nextRun' | 'lastRun' | 'running'
+>
+
+export interface ScheduledTaskLog {
+  run: ScheduledTaskRun
+  content: string
 }
 
 export interface TerminalStartResult {
@@ -275,6 +330,16 @@ export interface ClaudeViewApi {
   captureScreenshot(context: FileContext): Promise<Attachment[]>
   onScreenshotTrigger(callback: () => void): () => void
   updateAttention(summary: AttentionSummary): Promise<void>
+  listScheduledTasks(): Promise<ScheduledTask[]>
+  createScheduledTask(input: ScheduledTaskInput): Promise<ScheduledTask>
+  updateScheduledTask(id: string, input: ScheduledTaskInput): Promise<ScheduledTask>
+  deleteScheduledTask(id: string): Promise<void>
+  setScheduledTaskEnabled(id: string, enabled: boolean): Promise<ScheduledTask>
+  runScheduledTask(id: string): Promise<ActionResult>
+  cancelScheduledTask(id: string): Promise<ActionResult>
+  listScheduledTaskRuns(id: string): Promise<ScheduledTaskRun[]>
+  readScheduledTaskLog(id: string, runId: string): Promise<ScheduledTaskLog>
+  onSchedulesChanged(callback: () => void): () => void
   updateSettings(patch: Partial<AppSettings>): Promise<AppSettings>
   onDataChanged(callback: () => void): () => void
 }

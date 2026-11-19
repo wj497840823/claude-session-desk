@@ -2,6 +2,7 @@ import {
   Archive,
   ChevronDown,
   ChevronRight,
+  Clock,
   Folder,
   FolderOpen,
   Layers,
@@ -48,10 +49,13 @@ export default function ProjectRail(): React.JSX.Element {
   const toggleView = useStore((state) => state.toggleView)
   const openTerminalDialog = useStore((state) => state.openTerminalDialog)
   const showToast = useStore((state) => state.showToast)
+  const setScheduledTasksOpen = useStore((state) => state.setScheduledTasksOpen)
   const archived = useStore((state) => state.archived)
   const terminals = useStore((state) => state.terminals)
   const terminalStatus = useStore((state) => state.terminalStatus)
   const terminalActivity = useStore((state) => state.terminalActivity)
+  const attention = useStore((state) => state.attention)
+  const clearAllAttention = useStore((state) => state.clearAllAttention)
   const activeTab = useStore((state) => state.activeTab)
   const setActiveTerminal = useStore((state) => state.setActiveTerminal)
   const [historyOpen, setHistoryOpen] = useState(false)
@@ -81,6 +85,7 @@ export default function ProjectRail(): React.JSX.Element {
     const status = terminalStatus[tab.key]
     return status === 'running' || status === 'starting'
   })
+  const attentionCount = Object.keys(attention).length
   const historyEnabled = snapshot?.settings.loadHistory ?? false
   const activityLabel = (tab: (typeof terminals)[number]): string => {
     if (terminalStatus[tab.key] === 'starting') return '启动中'
@@ -269,22 +274,40 @@ export default function ProjectRail(): React.JSX.Element {
               )}
             </>
           )}
+          <button
+            className="rail-item"
+            onClick={() => setScheduledTasksOpen(true)}
+          >
+            <Clock size={15} />
+            <span>定时任务</span>
+          </button>
           {runningTabs.length > 0 && (
             <div className="rail-running">
               <div className="rail-heading-row">
                 <div className="rail-heading">运行中</div>
+                {attentionCount > 0 && (
+                  <button
+                    className="rail-attention-clear"
+                    onClick={clearAllAttention}
+                    title="全部标为已读"
+                  >
+                    全部已读
+                  </button>
+                )}
                 <span className="rail-count">{runningTabs.length}</span>
               </div>
               {runningTabs.map((tab) => (
                 <button
                   key={tab.key}
-                  className={`rail-item rail-running-tab ${tab.key === activeTab ? 'active' : ''}`}
+                  className={`rail-item rail-running-tab ${tab.key === activeTab ? 'active' : ''} ${
+                    tab.sessionId && attention[tab.sessionId] ? 'pending' : ''
+                  }`}
                   onClick={() => setActiveTerminal(tab.key)}
                   title={`${tab.sessionTitle ?? tab.projectName} · ${tab.cwd}`}
                 >
                   <span className={`terminal-tab-dot ${terminalStatus[tab.key] ?? 'stopped'} ${tab.sessionId ? terminalActivity[tab.sessionId] ?? '' : ''}`} />
                   <span className="rail-project-name">{tab.sessionTitle ?? tab.projectName}</span>
-                  <span className="rail-running-status">{activityLabel(tab)}</span>
+                  <span className={`rail-running-status ${tab.sessionId ? terminalActivity[tab.sessionId] ?? '' : ''}`}>{activityLabel(tab)}</span>
                 </button>
               ))}
             </div>

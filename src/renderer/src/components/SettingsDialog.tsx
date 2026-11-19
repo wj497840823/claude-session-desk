@@ -145,6 +145,38 @@ export default function SettingsDialog(): React.JSX.Element | null {
           </span>
         </label>
 
+        <label className="settings-check">
+          <input
+            type="checkbox"
+            checked={draft.terminalCopyOnSelect}
+            onChange={(event) =>
+              update('terminalCopyOnSelect', event.target.checked)
+            }
+          />
+          <span>
+            <strong>选中终端文本时自动复制</strong>
+            <small>
+              用鼠标或键盘选中终端内容后自动写入剪贴板，不需要再按 Ctrl+Shift+C。
+            </small>
+          </span>
+        </label>
+
+        <label className="settings-check">
+          <input
+            type="checkbox"
+            checked={draft.terminalRightClickPaste}
+            onChange={(event) =>
+              update('terminalRightClickPaste', event.target.checked)
+            }
+          />
+          <span>
+            <strong>在终端中右键粘贴</strong>
+            <small>
+              在终端空白处右键粘贴剪贴板内容；右键文件路径时仍打开文件操作菜单。
+            </small>
+          </span>
+        </label>
+
         <label className="settings-field">
           <span>主题</span>
           <select

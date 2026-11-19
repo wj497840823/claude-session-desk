@@ -43,4 +43,12 @@ describe('attention tracking', () => {
     store.closeTerminal('tab-1')
     expect(useStore.getState().attention).toEqual({})
   })
+
+  it('can clear every pending attention marker at once', () => {
+    const store = useStore.getState()
+    store.setAttention('s1', 'completed')
+    store.setAttention('s2', 'approval')
+    store.clearAllAttention()
+    expect(useStore.getState().attention).toEqual({})
+  })
 })

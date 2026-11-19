@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useRef, useState } from 'react'
 import { FileText, MoreHorizontal, Plus, X } from 'lucide-react'
-import { useStore, type TerminalSession } from '../store'
+import type { TerminalActivity } from '@shared/types'
+import { useStore, type TerminalSession, type TerminalStatus } from '../store'
 import ConfirmDialog from './ConfirmDialog'
 import { closeConversationTabs } from '../lib/actions'
 
@@ -12,18 +13,30 @@ function tabLabel(
   tab: TerminalSession,
   index: number
 ): string {
-  const base =
-    tab.kind === 'resume'
-      ? tab.sessionTitle?.trim() || `${tab.projectName} · 恢复`
-      : tab.kind === 'fork'
-        ? tab.sessionTitle?.trim() || `${tab.projectName} · 副本`
-        : `${tab.projectName} · 新对话`
+  const base = tab.sessionTitle?.trim() ||
+    (tab.kind === 'resume' ? '恢复的对话' : tab.kind === 'fork' ? '副本对话' : '新对话')
   const earlier = terminals
     .slice(0, index)
     .filter(
       (item) => item.projectName === tab.projectName && item.kind === tab.kind
     ).length
   return earlier > 0 ? `${base} ${earlier + 1}` : base
+}
+
+function tabState(
+  tab: TerminalSession,
+  status: TerminalStatus | undefined,
+  activity: TerminalActivity | undefined
+): { text: string; short: string; kind: string } {
+  if (status === 'starting') return { text: '启动中', short: 'S', kind: 'starting' }
+  if (status === 'running') {
+    if (activity === 'approval') return { text: '待确认', short: 'A', kind: 'approval' }
+    if (activity === 'idle') return { text: '完成', short: 'D', kind: 'idle' }
+    if (activity === 'working') return { text: '工作中', short: 'W', kind: 'working' }
+    return { text: '运行中', short: 'R', kind: 'running' }
+  }
+  if (tab.dormant) return { text: '未启动', short: 'U', kind: 'stopped' }
+  return { text: '已结束', short: 'E', kind: 'stopped' }
 }
 
 function projectNameOf(path: string): string {
@@ -39,6 +52,7 @@ export default function WorkspacePane(): React.JSX.Element {
   const snapshot = useStore((state) => state.snapshot)
   const terminalStatus = useStore((state) => state.terminalStatus)
   const terminalActivity = useStore((state) => state.terminalActivity)
+  const attention = useStore((state) => state.attention)
   const setActiveTerminal = useStore((state) => state.setActiveTerminal)
   const closeRecordTab = useStore((state) => state.closeRecordTab)
   const openTerminalDialog = useStore((state) => state.openTerminalDialog)
@@ -177,7 +191,14 @@ export default function WorkspacePane(): React.JSX.Element {
           </div>
         )}
 
-        {terminals.map((tab, index) => (
+        {terminals.map((tab, index) => {
+          const status = terminalStatus[tab.key]
+          const activity = tab.sessionId && status === 'running'
+            ? terminalActivity[tab.sessionId]
+            : undefined
+          const state = tabState(tab, status, activity)
+          const label = tabLabel(terminals, tab, index)
+          return (
           <div
             key={tab.key}
             data-tab-key={tab.key}
@@ -186,8 +207,10 @@ export default function WorkspacePane(): React.JSX.Element {
             aria-selected={tab.key === effectiveTab}
             className={`terminal-tab ${
               tab.key === effectiveTab ? 'active' : ''
-            } ${selectedTabs.includes(tab.key) ? 'selected' : ''}`}
-            title={`${tabLabel(terminals, tab, index)}\n${tab.projectName} · ${tab.cwd}`}
+            } ${selectedTabs.includes(tab.key) ? 'selected' : ''} ${
+              activity ?? ''
+            } ${tab.sessionId && attention[tab.sessionId] ? 'pending' : ''}`}
+            title={`${label}\n${tab.projectName} · ${tab.cwd}\n${state.text}`}
             onClick={(event) => {
               if (selecting || event.ctrlKey || event.metaKey) {
                 setSelecting(true)
@@ -206,16 +229,23 @@ export default function WorkspacePane(): React.JSX.Element {
               }
             }}
           >
-            {selecting && <input type="checkbox" aria-label={`选择标签 ${tabLabel(terminals, tab, index)}`}
+            {selecting && <input type="checkbox" aria-label={`选择标签 ${label}`}
               checked={selectedTabs.includes(tab.key)} onClick={(event) => event.stopPropagation()}
               onChange={() => toggleTab(tab.key)} />}
+            {tab.sessionId && attention[tab.sessionId] && (
+              <span
+                className={`terminal-tab-attention ${attention[tab.sessionId]}`}
+                title={attention[tab.sessionId] === 'approval' ? '等待确认，待查看' : '已完成，待查看'}
+              />
+            )}
+            <span className="terminal-tab-label">{label}</span>
+            <span className="terminal-tab-project" title={tab.projectName}>{tab.projectName}</span>
             <span
-              className={`terminal-tab-dot ${
-                terminalStatus[tab.key] ?? 'stopped'
-              } ${terminalStatus[tab.key] === 'running' && tab.sessionId ? terminalActivity[tab.sessionId] ?? '' : ''}`}
-            />
-            <span className="terminal-tab-label">
-              {tabLabel(terminals, tab, index)}
+              className={`terminal-tab-letter ${state.kind}`}
+              title={state.text}
+              aria-label={state.text}
+            >
+              {state.short}
             </span>
             <button
               className="terminal-tab-close"
@@ -228,7 +258,8 @@ export default function WorkspacePane(): React.JSX.Element {
               <X size={12} />
             </button>
           </div>
-        ))}
+          )
+        })}
 
       </div>
       <div className="workspace-tab-actions">

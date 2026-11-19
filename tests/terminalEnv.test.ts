@@ -14,4 +14,12 @@ describe('embedded terminal IME environment', () => {
     expect(terminalEnv().CLAUDE_CODE_NATIVE_CURSOR).toBe('1')
     expect(process.env.CLAUDE_CODE_NATIVE_CURSOR).toBe('0')
   })
+
+  it('keeps loopback hook traffic out of any proxy', () => {
+    vi.stubEnv('NO_PROXY', 'example.com')
+    const env = terminalEnv()
+    expect(env.NO_PROXY).toContain('127.0.0.1')
+    expect(env.NO_PROXY).toContain('localhost')
+    expect(env.NO_PROXY).toContain('example.com')
+  })
 })

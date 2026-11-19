@@ -69,6 +69,7 @@ export default function TerminalTab({
   active: boolean
 }): React.JSX.Element {
   const setStatus = useStore((state) => state.setTerminalStatus)
+  const clearTerminalActivity = useStore((state) => state.clearTerminalActivity)
   const setFocused = useStore((state) => state.setTerminalFocused)
   const showToast = useStore((state) => state.showToast)
   const snapshot = useStore((state) => state.snapshot)
@@ -83,6 +84,16 @@ export default function TerminalTab({
   const activity = useStore((state) =>
     session.sessionId ? state.terminalActivity[session.sessionId] : undefined
   )
+  const copyOnSelect = useStore(
+    (state) => state.snapshot?.settings.terminalCopyOnSelect ?? true
+  )
+  const rightClickPaste = useStore(
+    (state) => state.snapshot?.settings.terminalRightClickPaste ?? true
+  )
+  const copyOnSelectRef = useRef(copyOnSelect)
+  const rightClickPasteRef = useRef(rightClickPaste)
+  copyOnSelectRef.current = copyOnSelect
+  rightClickPasteRef.current = rightClickPaste
   const sessionKey = snapshot?.sessions.find((item) =>
     item.source === 'transcript' && item.id === session.sessionId && item.projectPath === session.cwd
   )?.key ?? snapshot?.sessions.find((item) =>
@@ -220,6 +231,16 @@ export default function TerminalTab({
       if (!reference || /^https?:\/\//i.test(reference)) return false
       const result = await checkFile(reference)
       return !result.ok || !result.path
+    })
+    let selectionTimer: ReturnType<typeof setTimeout> | null = null
+    const selectionDisposable = term.onSelectionChange(() => {
+      if (!copyOnSelectRef.current) return
+      if (selectionTimer) clearTimeout(selectionTimer)
+      selectionTimer = setTimeout(() => {
+        selectionTimer = null
+        if (disposed || !term.hasSelection()) return
+        void navigator.clipboard.writeText(term.getSelection()).catch(() => undefined)
+      }, 250)
     })
     const insert = async (
       task: () => Promise<ClipboardPaste>,
@@ -426,6 +447,7 @@ export default function TerminalTab({
       pendingData.length = 0
       pendingExits.clear()
       bufferedSize = 0
+      if (session.sessionId) clearTerminalActivity(session.sessionId)
       setStarting(true)
       setRunning(false)
       setStatus(session.key, 'starting')
@@ -541,6 +563,8 @@ export default function TerminalTab({
       if (ptyId) void window.api.stopTerminal(ptyId).catch(() => undefined)
       ptyIdRef.current = null
       dataDisposable.dispose()
+      if (selectionTimer) clearTimeout(selectionTimer)
+      selectionDisposable.dispose()
       offData()
       offExit()
       observer.disconnect()
@@ -557,7 +581,7 @@ export default function TerminalTab({
       fitRef.current = null
       setFocused(false)
     }
-  }, [session.key, setFocused, setStatus, showToast])
+  }, [session.key, setFocused, setStatus, showToast, clearTerminalActivity])
 
   useEffect(() => {
     const term = termRef.current
@@ -864,9 +888,21 @@ export default function TerminalTab({
       </div>}
       <div className="terminal-body" ref={containerRef} onContextMenu={(event) => {
         const reference = hoveredFileRef.current
-        if (!reference || /^https?:\/\//i.test(reference)) return
+        if (reference && !/^https?:\/\//i.test(reference)) {
+          event.preventDefault()
+          setFileMenu({ reference, x: event.clientX, y: event.clientY })
+          return
+        }
+        if (!rightClickPaste) return
         event.preventDefault()
-        setFileMenu({ reference, x: event.clientX, y: event.clientY })
+        void (async () => {
+          const term = termRef.current
+          if (term?.hasSelection() && copyOnSelectRef.current) {
+            await navigator.clipboard.writeText(term.getSelection()).catch(() => undefined)
+            return
+          }
+          await attachmentInputRef.current.paste()
+        })()
       }} />
       {dormant && (
         <div className="terminal-dormant">

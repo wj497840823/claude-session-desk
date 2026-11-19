@@ -1,6 +1,6 @@
 // Isolated integration checks against the compiled Electron app.
 // Run after npm run build: node_modules/electron/dist/electron.exe scripts/smoke.cjs
-const { app, BrowserWindow, ipcMain } = require('electron')
+const { app, BrowserWindow, ipcMain, Notification } = require('electron')
 const { mkdtemp, mkdir, writeFile, appendFile } = require('node:fs/promises')
 const { tmpdir } = require('node:os')
 const { join } = require('node:path')
@@ -22,6 +22,8 @@ async function until(check, label, ms = 7000) {
 // Do not show or focus any desktop window during the test.
 BrowserWindow.prototype.show = function () {}
 BrowserWindow.prototype.focus = function () {}
+// Smoke runs must not raise OS-level toasts on the developer's desktop.
+Notification.prototype.show = function () {}
 const overlayCalls = []
 BrowserWindow.prototype.setOverlayIcon = function (_image, description) {
   overlayCalls.push(description)
@@ -40,7 +42,15 @@ app.on('web-contents-created', (_event, contents) => {
   try {
     await mkdir(configDir)
     await writeFile(join(configDir, 'config.json'), JSON.stringify({
-      version: 1, favorites: [], settings: { minimizeToTray: false, sessionClickAction: 'record' }
+      version: 1,
+      favorites: [],
+      settings: {
+        minimizeToTray: false,
+        sessionClickAction: 'record',
+        // The scheduled-task check runs a real task; keep the smoke run from
+        // raising OS-level toasts on the developer's desktop.
+        desktopNotifications: false
+      }
     }))
     process.env.CLAUDE_SESSION_MANAGER_ROOT = join(dir, 'projects')
     process.env.CLAUDE_SESSION_MANAGER_USER_DATA = configDir
@@ -511,6 +521,49 @@ app.on('web-contents-created', (_event, contents) => {
     assert(forkRequests[0].newSessionId && forkRequests[0].newSessionId !== forkSourceId)
     assert(!forkRequests[0].sessionId)
     checks.push('Forking a conversation preallocates a new id and resumes the source with --fork-session')
+
+    const scheduledName = 'smoke-scheduled-task'
+    const scheduled = await js(`window.api.createScheduledTask(${JSON.stringify({
+      name: scheduledName,
+      enabled: true,
+      projectPath: dir,
+      type: 'command',
+      command: 'echo smoke-scheduled',
+      schedule: { kind: 'once', at: Date.now() + 3_600_000 }
+    })})`)
+    const scheduledRun = await js(`window.api.runScheduledTask(${JSON.stringify(scheduled.id)})`)
+    assert(scheduledRun.ok, 'Scheduled task should start')
+    await until(async () => {
+      const tasks = await js(`window.api.listScheduledTasks()`)
+      const task = tasks.find((item) => item.id === scheduled.id)
+      return Boolean(task && !task.running && task.lastRun?.status === 'success')
+    }, 'scheduled command task result')
+    const scheduledRuns = await js(`window.api.listScheduledTaskRuns(${JSON.stringify(scheduled.id)})`)
+    assert(scheduledRuns.length >= 1)
+    const scheduledLog = await js(`window.api.readScheduledTaskLog(${JSON.stringify(scheduled.id)},${JSON.stringify(scheduledRuns[0].id)})`)
+    assert(scheduledLog.content.includes('smoke-scheduled'))
+    await js(`Array.from(document.querySelectorAll('.rail-item')).find(b => b.textContent.includes('定时任务')).click()`)
+    await until(() => js(`document.querySelector('.scheduled-dialog')?.textContent.includes(${JSON.stringify(scheduledName)})`), 'scheduled task row')
+    await js(`document.querySelector('.scheduled-dialog button[title="关闭"]').click()`)
+    await until(() => js(`!document.querySelector('.scheduled-dialog')`), 'scheduled dialog closed')
+    await js(`window.api.deleteScheduledTask(${JSON.stringify(scheduled.id)})`)
+    checks.push('Scheduled command tasks can be created, run and inspected from the app')
+
+    const existingTask = await js(`window.api.createScheduledTask(${JSON.stringify({
+      name: 'smoke-existing-session-task',
+      enabled: false,
+      projectPath: dir,
+      type: 'claude',
+      prompt: '追加到已有会话',
+      permissionMode: 'plan',
+      sessionMode: 'existing',
+      resumeSessionId: sessionId,
+      schedule: { kind: 'once', at: Date.now() + 3_600_000 }
+    })})`)
+    assert.equal(existingTask.sessionMode, 'existing')
+    assert.equal(existingTask.resumeSessionId, sessionId)
+    await js(`window.api.deleteScheduledTask(${JSON.stringify(existingTask.id)})`)
+    checks.push('Scheduled Claude tasks can target an existing session')
 
     if (process.env.CSM_NAV_SCREENSHOT) {
       win.setSize(1280, 800)

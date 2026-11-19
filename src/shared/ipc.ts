@@ -35,6 +35,16 @@ export const IPC = {
   screenshotCapture: 'screenshot:capture',
   screenshotTrigger: 'screenshot:trigger',
   attentionUpdate: 'attention:update',
+  schedulesList: 'schedules:list',
+  schedulesCreate: 'schedules:create',
+  schedulesUpdate: 'schedules:update',
+  schedulesDelete: 'schedules:delete',
+  schedulesEnable: 'schedules:enable',
+  schedulesRun: 'schedules:run',
+  schedulesCancel: 'schedules:cancel',
+  schedulesRuns: 'schedules:runs',
+  schedulesLog: 'schedules:log',
+  schedulesChanged: 'schedules:changed',
   settingsUpdate: 'settings:update',
   dataChanged: 'data:changed'
 } as const

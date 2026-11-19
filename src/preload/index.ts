@@ -45,6 +45,22 @@ const api: ClaudeViewApi = {
     ipcRenderer.invoke(IPC.terminalResize, ptyId, cols, rows),
   stopTerminal: (ptyId) => ipcRenderer.invoke(IPC.terminalStop, ptyId),
   updateAttention: (summary) => ipcRenderer.invoke(IPC.attentionUpdate, summary),
+  listScheduledTasks: () => ipcRenderer.invoke(IPC.schedulesList),
+  createScheduledTask: (input) => ipcRenderer.invoke(IPC.schedulesCreate, input),
+  updateScheduledTask: (id, input) => ipcRenderer.invoke(IPC.schedulesUpdate, id, input),
+  deleteScheduledTask: (id) => ipcRenderer.invoke(IPC.schedulesDelete, id),
+  setScheduledTaskEnabled: (id, enabled) => ipcRenderer.invoke(IPC.schedulesEnable, id, enabled),
+  runScheduledTask: (id) => ipcRenderer.invoke(IPC.schedulesRun, id),
+  cancelScheduledTask: (id) => ipcRenderer.invoke(IPC.schedulesCancel, id),
+  listScheduledTaskRuns: (id) => ipcRenderer.invoke(IPC.schedulesRuns, id),
+  readScheduledTaskLog: (id, runId) => ipcRenderer.invoke(IPC.schedulesLog, id, runId),
+  onSchedulesChanged: (callback) => {
+    const listener = (): void => callback()
+    ipcRenderer.on(IPC.schedulesChanged, listener)
+    return () => {
+      ipcRenderer.removeListener(IPC.schedulesChanged, listener)
+    }
+  },
   updateSettings: (patch) => ipcRenderer.invoke(IPC.settingsUpdate, patch),
   onTerminalData: (callback) => {
     const listener = (_event: unknown, payload: { ptyId: string; data: string }): void => {

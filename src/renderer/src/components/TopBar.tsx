@@ -33,6 +33,14 @@ export default function TopBar(): React.JSX.Element {
     (state) => state.sessionListCollapsed
   )
   const toggleSessionList = useStore((state) => state.toggleSessionList)
+  const terminals = useStore((state) => state.terminals)
+  const attention = useStore((state) => state.attention)
+  const setActiveTerminal = useStore((state) => state.setActiveTerminal)
+  const clearAllAttention = useStore((state) => state.clearAllAttention)
+  const attentionCount = Object.keys(attention).length
+  const pendingTab = terminals.find(
+    (tab) => tab.sessionId && attention[tab.sessionId]
+  )
   const inputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
@@ -96,6 +104,26 @@ export default function TopBar(): React.JSX.Element {
         )}
       </div>
       <div className="topbar-meta">
+        {attentionCount > 0 && (
+          <div className="attention-chip" role="status">
+            <button
+              className="attention-jump"
+              disabled={!pendingTab}
+              onClick={() => pendingTab && setActiveTerminal(pendingTab.key)}
+              title="跳到待查看对话"
+            >
+              待查看 {attentionCount}
+            </button>
+            <button
+              className="attention-clear"
+              onClick={clearAllAttention}
+              title="全部标为已读"
+              aria-label="全部标为已读"
+            >
+              ×
+            </button>
+          </div>
+        )}
         <span title={`活动对话 ${transcriptCount} 个，历史记录 ${historyOnly} 个`}>
           {transcriptCount} 个活动会话
           {historyOnly > 0 ? ` · ${historyOnly} 条历史` : ''}

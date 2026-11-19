@@ -22,8 +22,13 @@ export function isTerminalPermissionMode(
   )
 }
 
+export interface TerminalArgInjection {
+  settingsJson?: string
+}
+
 export function buildClaudeTerminalArgs(
-  options: Pick<TerminalStartOptions, 'sessionId' | 'newSessionId' | 'forkFromSessionId' | 'mode'>
+  options: Pick<TerminalStartOptions, 'sessionId' | 'newSessionId' | 'forkFromSessionId' | 'mode'>,
+  injection: TerminalArgInjection = {}
 ): string[] {
   if (!isTerminalPermissionMode(options.mode)) {
     throw new Error('非法权限模式')
@@ -49,6 +54,7 @@ export function buildClaudeTerminalArgs(
   if (options.mode !== 'follow') {
     args.push('--permission-mode', options.mode)
   }
+  if (injection.settingsJson) args.push('--settings', injection.settingsJson)
   return args
 }
 

@@ -1,4 +1,4 @@
-import { isAbsolute, relative, resolve } from 'node:path'
+import { isAbsolute, relative, resolve, sep } from 'node:path'
 
 export const SESSION_ID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -30,5 +30,10 @@ export function parseSessionKey(key: unknown): ParsedSessionKey | null {
 
 export function isPathInside(root: string, candidate: string): boolean {
   const rel = relative(resolve(root), resolve(candidate))
-  return Boolean(rel) && !rel.startsWith('..') && !isAbsolute(rel)
+  return (
+    Boolean(rel) &&
+    rel !== '..' &&
+    !rel.startsWith(`..${sep}`) &&
+    !isAbsolute(rel)
+  )
 }

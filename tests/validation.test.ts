@@ -28,6 +28,7 @@ describe('validation', () => {
     expect(isPathInside('C:/data', 'C:/data/a/b.txt')).toBe(true)
     expect(isPathInside('C:/data', 'C:/other/b.txt')).toBe(false)
     expect(isPathInside('C:/data', 'C:/data/../secret.txt')).toBe(false)
+    expect(isPathInside('C:/data', 'C:/data/..backup/a.txt')).toBe(true)
     expect(isPathInside('C:/data', 'C:/data')).toBe(false)
   })
 })

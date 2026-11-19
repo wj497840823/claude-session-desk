@@ -1,9 +1,10 @@
 import { ipcMain } from 'electron'
 import { IPC } from '@shared/ipc'
-import type { AppSettings, AttentionSummary } from '@shared/types'
+import type { AppSettings, AttentionSummary, ScheduledTaskInput } from '@shared/types'
 import type { AppServices } from './services'
 import type { TerminalService } from './terminal'
 import type { FileService } from './files'
+import type { ScheduledTaskService } from './scheduledTasks'
 import { captureScreenshot } from './screenshot'
 import type { FileContext } from '@shared/types'
 
@@ -20,8 +21,32 @@ export function registerIpc(
   files: FileService,
   onSettingsChanged?: (settings: AppSettings) => void,
   onScreenshotCaptured?: () => void,
-  onAttentionChanged?: (summary: AttentionSummary) => void
+  onAttentionChanged?: (summary: AttentionSummary) => void,
+  scheduledTasks?: ScheduledTaskService
 ): void {
+  const requireSchedules = (): ScheduledTaskService => {
+    if (!scheduledTasks) throw new Error('定时任务服务未启动')
+    return scheduledTasks
+  }
+  ipcMain.handle(IPC.schedulesList, () => scheduledTasks?.list() ?? [])
+  ipcMain.handle(IPC.schedulesCreate, (_event, input: ScheduledTaskInput) =>
+    requireSchedules().create(input))
+  ipcMain.handle(IPC.schedulesUpdate, (_event, id: unknown, input: ScheduledTaskInput) =>
+    requireSchedules().update(requireString(id, 'taskId'), input))
+  ipcMain.handle(IPC.schedulesDelete, (_event, id: unknown) =>
+    requireSchedules().remove(requireString(id, 'taskId')))
+  ipcMain.handle(IPC.schedulesEnable, (_event, id: unknown, enabled: unknown) => {
+    if (typeof enabled !== 'boolean') throw new Error('非法启用状态')
+    return requireSchedules().setEnabled(requireString(id, 'taskId'), enabled)
+  })
+  ipcMain.handle(IPC.schedulesRun, (_event, id: unknown) =>
+    requireSchedules().runNow(requireString(id, 'taskId')))
+  ipcMain.handle(IPC.schedulesCancel, (_event, id: unknown) =>
+    requireSchedules().cancel(requireString(id, 'taskId')))
+  ipcMain.handle(IPC.schedulesRuns, (_event, id: unknown) =>
+    requireSchedules().runs(requireString(id, 'taskId')))
+  ipcMain.handle(IPC.schedulesLog, (_event, id: unknown, runId: unknown) =>
+    requireSchedules().readLog(requireString(id, 'taskId'), requireString(runId, 'runId')))
   ipcMain.handle(IPC.attentionUpdate, (_event, summary: unknown) => {
     if (!summary || typeof summary !== 'object') throw new Error('非法提示参数')
     const value = summary as Record<string, unknown>

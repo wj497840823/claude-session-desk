@@ -75,6 +75,14 @@ function normalizeSettings(raw: Partial<AppSettings> | undefined): AppSettings {
       typeof settings.desktopNotifications === 'boolean'
         ? settings.desktopNotifications
         : DEFAULT_APP_SETTINGS.desktopNotifications,
+    terminalCopyOnSelect:
+      typeof settings.terminalCopyOnSelect === 'boolean'
+        ? settings.terminalCopyOnSelect
+        : DEFAULT_APP_SETTINGS.terminalCopyOnSelect,
+    terminalRightClickPaste:
+      typeof settings.terminalRightClickPaste === 'boolean'
+        ? settings.terminalRightClickPaste
+        : DEFAULT_APP_SETTINGS.terminalRightClickPaste,
     theme:
       typeof settings.theme === 'string' &&
       THEMES.includes(settings.theme as AppTheme)
