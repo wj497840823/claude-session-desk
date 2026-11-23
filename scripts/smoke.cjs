@@ -1,7 +1,7 @@
 // Isolated integration checks against the compiled Electron app.
 // Run after npm run build: node_modules/electron/dist/electron.exe scripts/smoke.cjs
 const { app, BrowserWindow, ipcMain, Notification } = require('electron')
-const { mkdtemp, mkdir, writeFile, appendFile } = require('node:fs/promises')
+const { mkdtemp, mkdir, writeFile, appendFile, realpath } = require('node:fs/promises')
 const { tmpdir } = require('node:os')
 const { join } = require('node:path')
 const assert = require('node:assert/strict')
@@ -35,7 +35,8 @@ app.on('web-contents-created', (_event, contents) => {
 })
 
 ;(async () => {
-  const dir = process.env.CSM_SMOKE_DIR || await mkdtemp(join(tmpdir(), 'csm-smoke-'))
+  const rawDir = process.env.CSM_SMOKE_DIR || await mkdtemp(join(tmpdir(), 'csm-smoke-'))
+  const dir = await realpath(rawDir)
   const projectDir = join(dir, 'projects', 'demo')
   const configDir = join(dir, 'config')
   const sessionId = '11111111-1111-4111-8111-111111111111'
