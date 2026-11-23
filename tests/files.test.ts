@@ -1,4 +1,4 @@
-import { mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { afterEach, expect, it, vi } from 'vitest'
@@ -19,8 +19,9 @@ afterEach(async () => {
   dirs.length = 0
 })
 async function fixture() {
-  const dir = await tempDir()
-  dirs.push(dir)
+  const raw = await tempDir()
+  dirs.push(raw)
+  const dir = await realpath(raw)
   const project = join(dir, 'project')
   await mkdir(project)
   const userData = join(dir, 'config')

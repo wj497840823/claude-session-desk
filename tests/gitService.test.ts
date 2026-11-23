@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
@@ -32,8 +32,9 @@ async function git(cwd: string, args: string[]): Promise<void> {
 }
 
 async function repoFixture(): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), 'csm-git-'))
-  dirs.push(dir)
+  const raw = await mkdtemp(join(tmpdir(), 'csm-git-'))
+  dirs.push(raw)
+  const dir = await realpath(raw)
   await git(dir, ['init', '-q'])
   await git(dir, ['config', 'user.email', 'test@example.com'])
   await git(dir, ['config', 'user.name', 'Test'])
@@ -110,7 +111,8 @@ describeGit('GitService read', () => {
   it('reports a non-repository project', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'csm-git-'))
     dirs.push(dir)
-    const service = await serviceFor(dir)
+    const canonical = await realpath(dir)
+    const service = await serviceFor(canonical)
     const status = await service.status('p1', true)
     expect(status.isRepo).toBe(false)
     expect(status.error?.code).toBe('not-a-repo')
