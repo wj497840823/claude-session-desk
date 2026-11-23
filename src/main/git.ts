@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { relative, resolve } from 'node:path'
+import { posix, resolve } from 'node:path'
 import { shell } from 'electron'
 import type {
   ActionResult,
@@ -51,32 +51,18 @@ function normalizePath(path: string): string {
   return path.replace(/\\/g, '/')
 }
 
-function scopeOf(repoRoot: string, projectPath: string): string {
-  const rel = normalizePath(relative(repoRoot, projectPath))
-  return rel === '' || rel === '.' ? '.' : rel
+function toDisplayPath(prefix: string, rawPath: string): string {
+  return prefix ? normalizePath(posix.relative(prefix, rawPath)) : normalizePath(rawPath)
 }
 
-function toDisplayPath(
-  repoRoot: string,
-  projectPath: string,
-  rawPath: string
-): string {
-  const rel = normalizePath(relative(projectPath, resolve(repoRoot, rawPath)))
-  return rel === '' ? normalizePath(rawPath) : rel
+function toRepoPath(prefix: string, path: string): string {
+  const combined = prefix ? `${prefix}/${path}` : path
+  return posix.normalize(combined)
 }
 
-function toRepoPath(repoRoot: string, scope: string, path: string): string {
-  const combined = scope === '.' ? path : `${scope}/${path}`
-  return normalizePath(relative(repoRoot, resolve(repoRoot, combined)))
-}
-
-function pathsForEntry(
-  entry: GitFileEntry,
-  repoRoot: string,
-  scope: string
-): string[] {
+function pathsForEntry(entry: GitFileEntry, prefix: string): string[] {
   const paths = entry.origPath ? [entry.path, entry.origPath] : [entry.path]
-  return paths.map((path) => toRepoPath(repoRoot, scope, path))
+  return paths.map((path) => toRepoPath(prefix, path))
 }
 
 function validPaths(repoRoot: string, paths: string[]): boolean {
@@ -89,9 +75,9 @@ function validPaths(repoRoot: string, paths: string[]): boolean {
 }
 
 export class GitService {
-  private readonly repoRoots = new Map<
+  private readonly repoInfos = new Map<
     string,
-    { root: string | null; at: number }
+    { root: string | null; prefix: string; at: number }
   >()
   private readonly cache = new Map<
     string,
@@ -174,7 +160,7 @@ export class GitService {
 
     const scope = await this.projectScope(projectKey)
     if (!scope) throw new Error('项目不是 Git 仓库')
-    const repoPath = toRepoPath(scope.repoRoot, scope.scope, path)
+    const repoPath = toRepoPath(scope.prefix, path)
     if (!validPaths(scope.repoRoot, [repoPath])) throw new Error('非法文件路径')
     const absolute = resolve(scope.repoRoot, repoPath)
 
@@ -240,7 +226,7 @@ export class GitService {
     if (!scope) return { ok: false, message: '项目不是 Git 仓库' }
     const entry = this.whitelist.get(projectKey)?.get(path)
     if (!entry) return { ok: false, message: '文件不在当前变更列表中' }
-    const repoPath = toRepoPath(scope.repoRoot, scope.scope, path)
+    const repoPath = toRepoPath(scope.prefix, path)
     if (!validPaths(scope.repoRoot, [repoPath])) {
       return { ok: false, message: '非法文件路径' }
     }
@@ -262,7 +248,7 @@ export class GitService {
       if (!entry) return { ok: false, message: '文件不在当前变更列表中' }
       const scope = await this.projectScope(projectKey)
       if (!scope) return { ok: false, message: '项目不是 Git 仓库' }
-      const paths = pathsForEntry(entry, scope.repoRoot, scope.scope)
+      const paths = pathsForEntry(entry, scope.prefix)
       if (!validPaths(scope.repoRoot, paths)) {
         return { ok: false, message: '非法文件路径' }
       }
@@ -288,7 +274,7 @@ export class GitService {
       }
       const scope = await this.projectScope(projectKey)
       if (!scope) return { ok: false, message: '项目不是 Git 仓库' }
-      const paths = pathsForEntry(entry, scope.repoRoot, scope.scope)
+      const paths = pathsForEntry(entry, scope.prefix)
       if (!validPaths(scope.repoRoot, paths)) {
         return { ok: false, message: '非法文件路径' }
       }
@@ -319,7 +305,7 @@ export class GitService {
         .filter(
           (file) => !file.conflict && (file.untracked || file.worktreeKind !== null)
         )
-        .map((file) => toRepoPath(scope.repoRoot, scope.scope, file.path))
+        .map((file) => toRepoPath(scope.prefix, file.path))
       if (paths.length === 0) return { ok: true, message: '没有可暂存的文件' }
       if (!validPaths(scope.repoRoot, paths)) {
         return { ok: false, message: '非法文件路径' }
@@ -346,7 +332,7 @@ export class GitService {
       const scope = await this.projectScope(projectKey)
       if (!scope) return { ok: false, message: '项目不是 Git 仓库' }
       const result = await this.exec(
-        ['--literal-pathspecs', '-C', scope.repoRoot, 'reset', '-q', 'HEAD', '--', scope.scope],
+        ['--literal-pathspecs', '-C', scope.repoRoot, 'reset', '-q', 'HEAD', '--', scope.prefix || '.'],
         15000,
         1024 * 1024
       )
@@ -437,18 +423,20 @@ export class GitService {
         return this.errorStatus(projectKey, 'failed', '项目文件夹不存在')
       }
 
-      const repoRoot = await this.resolveRepoRoot(projectPath)
-      if (!repoRoot) {
+      const repoInfo = await this.resolveRepoInfo(projectPath)
+      if (!repoInfo) {
         return this.errorStatus(projectKey, 'not-a-repo', '该项目不是 Git 仓库')
       }
 
-      const scope = scopeOf(repoRoot, projectPath)
+      const repoRoot = repoInfo.root
+      const prefix = repoInfo.prefix
+      const pathspec = prefix || '.'
       const statusResult = await this.exec(
         [
           '-C', repoRoot,
           '-c', 'core.fsmonitor=false',
           'status', '--porcelain=v2', '--branch', '-z', '--untracked-files=all',
-          '--', scope
+          '--', pathspec
         ],
         6000,
         MAX_STATUS_BUFFER
@@ -463,9 +451,9 @@ export class GitService {
 
       const parsed = parsePorcelainV2(statusResult.stdout)
       for (const file of parsed.files) {
-        file.path = toDisplayPath(repoRoot, projectPath, file.path)
+        file.path = toDisplayPath(prefix, file.path)
         if (file.origPath) {
-          file.origPath = toDisplayPath(repoRoot, projectPath, file.origPath)
+          file.origPath = toDisplayPath(prefix, file.origPath)
         }
       }
       const displayStats = (
@@ -473,9 +461,9 @@ export class GitService {
       ): ReturnType<typeof parseNumstatZ> =>
         entries.map((entry) => ({
           ...entry,
-          path: toDisplayPath(repoRoot, projectPath, entry.path),
+          path: toDisplayPath(prefix, entry.path),
           origPath: entry.origPath
-            ? toDisplayPath(repoRoot, projectPath, entry.origPath)
+            ? toDisplayPath(prefix, entry.origPath)
             : undefined
         }))
       const [stagedResult, worktreeResult] = await Promise.all([
@@ -483,7 +471,7 @@ export class GitService {
           [
             '-C', repoRoot,
             '-c', 'core.fsmonitor=false',
-            'diff', '--numstat', '-z', '--cached', '--', scope
+            'diff', '--numstat', '-z', '--cached', '--', pathspec
           ],
           6000,
           MAX_STATUS_BUFFER
@@ -492,7 +480,7 @@ export class GitService {
           [
             '-C', repoRoot,
             '-c', 'core.fsmonitor=false',
-            'diff', '--numstat', '-z', '--', scope
+            'diff', '--numstat', '-z', '--', pathspec
           ],
           6000,
           MAX_STATUS_BUFFER
@@ -521,27 +509,41 @@ export class GitService {
     }
   }
 
-  private async resolveRepoRoot(projectPath: string): Promise<string | null> {
-    const cached = this.repoRoots.get(projectPath)
-    if (cached && Date.now() - cached.at < REPO_ROOT_TTL) return cached.root
+  private async resolveRepoInfo(
+    projectPath: string
+  ): Promise<{ root: string; prefix: string } | null> {
+    const cached = this.repoInfos.get(projectPath)
+    if (cached && Date.now() - cached.at < REPO_ROOT_TTL) {
+      return cached.root ? { root: cached.root, prefix: cached.prefix } : null
+    }
     const result = await this.exec(
-      ['-C', projectPath, 'rev-parse', '--show-toplevel'],
+      ['-C', projectPath, 'rev-parse', '--show-toplevel', '--show-prefix'],
       3000,
       1024 * 1024
     )
-    const root = result.code === 0 ? result.stdout.trim() : null
-    this.repoRoots.set(projectPath, { root, at: Date.now() })
-    return root
+    if (result.code !== 0) {
+      this.repoInfos.set(projectPath, { root: null, prefix: '', at: Date.now() })
+      return null
+    }
+    const [topline = '', prefixLine = ''] = result.stdout.split(/\r?\n/)
+    const root = normalizePath(topline.trim())
+    const prefix = normalizePath(prefixLine.trim()).replace(/\/+$/, '')
+    if (!root) {
+      this.repoInfos.set(projectPath, { root: null, prefix: '', at: Date.now() })
+      return null
+    }
+    this.repoInfos.set(projectPath, { root, prefix, at: Date.now() })
+    return { root, prefix }
   }
 
   private async projectScope(
     projectKey: string
-  ): Promise<{ repoRoot: string; scope: string } | null> {
+  ): Promise<{ repoRoot: string; prefix: string } | null> {
     const projectPath = await this.options.resolveProjectPath(projectKey)
     if (!projectPath || !existsSync(projectPath)) return null
-    const repoRoot = await this.resolveRepoRoot(projectPath)
-    if (!repoRoot) return null
-    return { repoRoot, scope: scopeOf(repoRoot, projectPath) }
+    const repoInfo = await this.resolveRepoInfo(projectPath)
+    if (!repoInfo) return null
+    return { repoRoot: repoInfo.root, prefix: repoInfo.prefix }
   }
 
   private errorStatus(
