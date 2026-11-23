@@ -1,10 +1,18 @@
-import { ipcMain } from 'electron'
+import { BrowserWindow, dialog, ipcMain, type OpenDialogOptions } from 'electron'
 import { IPC } from '@shared/ipc'
-import type { AppSettings, AttentionSummary, ScheduledTaskInput } from '@shared/types'
+import type {
+  AppSettings,
+  AttentionSummary,
+  ClaudeMdScope,
+  GitDiffGroup,
+  ScheduledTaskInput
+} from '@shared/types'
 import type { AppServices } from './services'
 import type { TerminalService } from './terminal'
 import type { FileService } from './files'
 import type { ScheduledTaskService } from './scheduledTasks'
+import type { ClaudeMdService } from './claudeMd'
+import type { GitService } from './git'
 import { captureScreenshot } from './screenshot'
 import type { FileContext } from '@shared/types'
 
@@ -15,6 +23,22 @@ function requireString(value: unknown, label: string): string {
   return value
 }
 
+function requireClaudeMdScope(value: unknown): ClaudeMdScope {
+  if (value === 'global' || value === 'project') return value
+  throw new Error('非法 CLAUDE.md 作用域')
+}
+
+function optionalString(value: unknown, label: string): string | undefined {
+  if (value === undefined || value === null) return undefined
+  if (typeof value !== 'string') throw new Error(`非法参数：${label}`)
+  return value
+}
+
+function requireText(value: unknown, label: string): string {
+  if (typeof value !== 'string') throw new Error(`非法参数：${label}`)
+  return value
+}
+
 export function registerIpc(
   services: AppServices,
   terminal: TerminalService,
@@ -22,11 +46,21 @@ export function registerIpc(
   onSettingsChanged?: (settings: AppSettings) => void,
   onScreenshotCaptured?: () => void,
   onAttentionChanged?: (summary: AttentionSummary) => void,
-  scheduledTasks?: ScheduledTaskService
+  scheduledTasks?: ScheduledTaskService,
+  claudeMd?: ClaudeMdService,
+  git?: GitService
 ): void {
   const requireSchedules = (): ScheduledTaskService => {
     if (!scheduledTasks) throw new Error('定时任务服务未启动')
     return scheduledTasks
+  }
+  const requireClaudeMd = (): ClaudeMdService => {
+    if (!claudeMd) throw new Error('CLAUDE.md 服务未启动')
+    return claudeMd
+  }
+  const requireGit = (): GitService => {
+    if (!git) throw new Error('Git 服务未启动')
+    return git
   }
   ipcMain.handle(IPC.schedulesList, () => scheduledTasks?.list() ?? [])
   ipcMain.handle(IPC.schedulesCreate, (_event, input: ScheduledTaskInput) =>
@@ -165,6 +199,144 @@ export function registerIpc(
   ipcMain.handle(IPC.terminalStop, (_event, ptyId: unknown) => {
     return terminal.stop(requireString(ptyId, 'ptyId'))
   })
+
+  ipcMain.handle(IPC.claudeMdRead, (_event, scope: unknown, projectKey: unknown) =>
+    requireClaudeMd().read({
+      scope: requireClaudeMdScope(scope),
+      projectKey: optionalString(projectKey, 'projectKey')
+    })
+  )
+
+  ipcMain.handle(IPC.claudeMdWrite, (_event, input: unknown) => {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) {
+      throw new Error('非法 CLAUDE.md 参数')
+    }
+    const value = input as Record<string, unknown>
+    return requireClaudeMd().write({
+      scope: requireClaudeMdScope(value.scope),
+      projectKey: optionalString(value.projectKey, 'projectKey'),
+      content: requireText(value.content, 'content')
+    })
+  })
+
+  ipcMain.handle(IPC.claudeMdTemplatesList, () => requireClaudeMd().listTemplates())
+
+  ipcMain.handle(IPC.claudeMdTemplateSave, (_event, input: unknown) => {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) {
+      throw new Error('非法模板参数')
+    }
+    const value = input as Record<string, unknown>
+    return requireClaudeMd().saveTemplate({
+      id: optionalString(value.id, 'id'),
+      name: requireText(value.name, 'name'),
+      description: optionalString(value.description, 'description') ?? '',
+      scope: requireClaudeMdScope(value.scope),
+      content: requireText(value.content, 'content')
+    })
+  })
+
+  ipcMain.handle(IPC.claudeMdTemplateDelete, (_event, id: unknown) =>
+    requireClaudeMd().deleteTemplate(requireString(id, 'templateId'))
+  )
+
+  ipcMain.handle(IPC.claudeMdTemplateImport, async (event, scope: unknown) => {
+    const service = requireClaudeMd()
+    const targetScope = requireClaudeMdScope(scope)
+    const parent = BrowserWindow.fromWebContents(event.sender)
+    const options: OpenDialogOptions = {
+      title: '导入 CLAUDE.md 模板',
+      filters: [{ name: 'Markdown 模板', extensions: ['md'] }],
+      properties: ['openFile']
+    }
+    const result = parent
+      ? await dialog.showOpenDialog(parent, options)
+      : await dialog.showOpenDialog(options)
+    if (result.canceled || !result.filePaths[0]) return null
+    return service.importTemplate(targetScope, result.filePaths[0])
+  })
+
+  ipcMain.handle(IPC.gitStatus, (_event, projectKey: unknown, force: unknown) => {
+    if (force !== undefined && typeof force !== 'boolean') throw new Error('非法刷新参数')
+    return requireGit().status(requireString(projectKey, 'projectKey'), force === true)
+  })
+
+  ipcMain.handle(IPC.gitStatusBatch, (_event, keys: unknown) => {
+    if (
+      !Array.isArray(keys) ||
+      keys.length === 0 ||
+      keys.length > 50 ||
+      !keys.every((key) => typeof key === 'string')
+    ) {
+      throw new Error('非法批量 Git 参数')
+    }
+    return requireGit().statusBatch(keys)
+  })
+
+  ipcMain.handle(
+    IPC.gitDiff,
+    (_event, projectKey: unknown, path: unknown, group: unknown) => {
+      if (
+        group !== 'staged' &&
+        group !== 'unstaged' &&
+        group !== 'untracked' &&
+        group !== 'conflict'
+      ) {
+        throw new Error('非法 diff 分组')
+      }
+      return requireGit().diff(
+        requireString(projectKey, 'projectKey'),
+        requireString(path, 'path'),
+        group as GitDiffGroup
+      )
+    }
+  )
+
+  ipcMain.handle(
+    IPC.gitFileAction,
+    (_event, projectKey: unknown, path: unknown, action: unknown) => {
+      if (action !== 'open' && action !== 'reveal') throw new Error('非法文件操作')
+      return requireGit().fileAction(
+        requireString(projectKey, 'projectKey'),
+        requireString(path, 'path'),
+        action
+      )
+    }
+  )
+
+  ipcMain.handle(IPC.gitStageFile, (_event, projectKey: unknown, path: unknown) =>
+    requireGit().stageFile(
+      requireString(projectKey, 'projectKey'),
+      requireString(path, 'path')
+    )
+  )
+
+  ipcMain.handle(IPC.gitUnstageFile, (_event, projectKey: unknown, path: unknown) =>
+    requireGit().unstageFile(
+      requireString(projectKey, 'projectKey'),
+      requireString(path, 'path')
+    )
+  )
+
+  ipcMain.handle(IPC.gitStageAll, (_event, projectKey: unknown) =>
+    requireGit().stageAll(requireString(projectKey, 'projectKey'))
+  )
+
+  ipcMain.handle(IPC.gitUnstageAll, (_event, projectKey: unknown) =>
+    requireGit().unstageAll(requireString(projectKey, 'projectKey'))
+  )
+
+  ipcMain.handle(
+    IPC.gitCommit,
+    (_event, projectKey: unknown, message: unknown, skipHooks: unknown) => {
+      if (typeof message !== 'string') throw new Error('非法提交说明')
+      if (typeof skipHooks !== 'boolean') throw new Error('非法钩子参数')
+      return requireGit().commit(
+        requireString(projectKey, 'projectKey'),
+        message,
+        skipHooks
+      )
+    }
+  )
 
   ipcMain.handle(IPC.settingsUpdate, async (_event, patch: unknown) => {
     if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {

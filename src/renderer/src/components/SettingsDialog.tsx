@@ -1,14 +1,18 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   DEFAULT_APP_SETTINGS,
   type AppSettings,
   type AppTheme,
+  type ClaudeMdFileInfo,
+  type ClaudeMdTemplate,
   type SessionClickAction,
   type TerminalPermissionMode
 } from '@shared/types'
+import { mergeClaudeMd } from '@shared/claudeMd'
 import { loadSnapshot } from '../lib/actions'
 import { useStore } from '../store'
 import { useDialog } from '../lib/useDialog'
+import ConfirmDialog from './ConfirmDialog'
 
 const THEME_OPTIONS: Array<{ value: AppTheme; label: string }> = [
   { value: 'system', label: '跟随系统' },
@@ -36,6 +40,38 @@ const SESSION_CLICK_OPTIONS: Array<{
   { value: 'record', label: '先查看会话记录' }
 ]
 
+interface ClaudeMdApplyPlan {
+  needsConfirm: boolean
+  content: string
+  added: number
+  skipped: number
+  noop: boolean
+}
+
+function planClaudeMdApply(
+  current: ClaudeMdFileInfo,
+  template: ClaudeMdTemplate,
+  mode: 'replace' | 'merge'
+): ClaudeMdApplyPlan {
+  if (mode === 'replace') {
+    return {
+      needsConfirm: current.exists && current.content.trim().length > 0,
+      content: template.content,
+      added: 0,
+      skipped: 0,
+      noop: false
+    }
+  }
+  const merged = mergeClaudeMd(current.content, template.content)
+  return {
+    needsConfirm: false,
+    content: merged.content,
+    added: merged.added.length,
+    skipped: merged.skipped.length,
+    noop: current.content.trim().length > 0 && merged.added.length === 0
+  }
+}
+
 export default function SettingsDialog(): React.JSX.Element | null {
   const open = useStore((state) => state.settingsOpen)
   const snapshot = useStore((state) => state.snapshot)
@@ -44,11 +80,127 @@ export default function SettingsDialog(): React.JSX.Element | null {
   const [draft, setDraft] = useState<AppSettings>(DEFAULT_APP_SETTINGS)
   const [saving, setSaving] = useState(false)
   const refreshing = useStore((state) => state.refreshing)
-  const dialogRef = useDialog(open, () => setSettingsOpen(false))
+  const dialogRef = useDialog(open, () => closeSettings())
+  const openClaudeMdEditor = useStore((state) => state.openClaudeMdEditor)
+  const setTemplateManagerOpen = useStore((state) => state.setTemplateManagerOpen)
+  const templateManagerOpen = useStore((state) => state.templateManagerOpen)
+  const claudeMdEditor = useStore((state) => state.claudeMdEditor)
+  const [claudeMd, setClaudeMd] = useState<ClaudeMdFileInfo | null>(null)
+  const [claudeMdTemplates, setClaudeMdTemplates] = useState<ClaudeMdTemplate[]>([])
+  const [claudeMdTemplateId, setClaudeMdTemplateId] = useState('')
+  const [claudeMdMode, setClaudeMdMode] = useState<'replace' | 'merge'>('replace')
+  const [claudeMdBusy, setClaudeMdBusy] = useState(false)
+  const [claudeMdTemplatesLoading, setClaudeMdTemplatesLoading] = useState(false)
+  const [claudeMdLoading, setClaudeMdLoading] = useState(false)
+  const [claudeMdError, setClaudeMdError] = useState('')
+  const [claudeMdTemplateError, setClaudeMdTemplateError] = useState('')
+  const [claudeMdStatus, setClaudeMdStatus] = useState('')
+  const [claudeMdReload, setClaudeMdReload] = useState(0)
+  const [confirmApply, setConfirmApply] = useState<{
+    template: ClaudeMdTemplate
+    mode: 'replace' | 'merge'
+  } | null>(null)
+  const claudeMdManagerWasOpen = useRef(false)
+  const claudeMdEditorWasOpen = useRef(false)
+  const claudeMdLoadId = useRef(0)
+  const claudeMdTemplateLoadId = useRef(0)
 
   useEffect(() => {
     if (open) setDraft(useStore.getState().snapshot?.settings ?? DEFAULT_APP_SETTINGS)
   }, [open])
+
+  useEffect(() => {
+    if (!open) return undefined
+    const fileId = ++claudeMdLoadId.current
+    const templateId = ++claudeMdTemplateLoadId.current
+    let cancelled = false
+    setClaudeMdLoading(true)
+    setClaudeMdTemplatesLoading(true)
+    setClaudeMdTemplates([])
+    setClaudeMd(null)
+    setClaudeMdError('')
+    setClaudeMdTemplateError('')
+    setClaudeMdStatus('')
+    setConfirmApply(null)
+
+    void window.api.readClaudeMd('global')
+      .then((info) => {
+        if (!cancelled && claudeMdLoadId.current === fileId) setClaudeMd(info)
+      })
+      .catch((error: unknown) => {
+        if (!cancelled && claudeMdLoadId.current === fileId) {
+          setClaudeMdError(error instanceof Error ? error.message : String(error))
+        }
+      })
+      .finally(() => {
+        if (!cancelled && claudeMdLoadId.current === fileId) setClaudeMdLoading(false)
+      })
+
+    void window.api.listClaudeMdTemplates()
+      .then((list) => {
+        if (cancelled || claudeMdTemplateLoadId.current !== templateId) return
+        const globals = list.filter((template) => template.scope === 'global')
+        setClaudeMdTemplates(globals)
+        setClaudeMdTemplateId((current) =>
+          current && globals.some((template) => template.id === current)
+            ? current
+            : globals[0]?.id ?? ''
+        )
+        setClaudeMdTemplateError('')
+      })
+      .catch((error: unknown) => {
+        if (!cancelled && claudeMdTemplateLoadId.current === templateId) {
+          setClaudeMdTemplateError(error instanceof Error ? error.message : String(error))
+        }
+      })
+      .finally(() => {
+        if (!cancelled && claudeMdTemplateLoadId.current === templateId) {
+          setClaudeMdTemplatesLoading(false)
+        }
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [open, claudeMdReload])
+
+  useEffect(() => {
+    if (!open) return
+    if (claudeMdManagerWasOpen.current && !templateManagerOpen) {
+      const id = ++claudeMdTemplateLoadId.current
+      setClaudeMdTemplatesLoading(true)
+      void window.api.listClaudeMdTemplates()
+        .then((list) => {
+          if (claudeMdTemplateLoadId.current !== id) return
+          const globals = list.filter((template) => template.scope === 'global')
+          setClaudeMdTemplates(globals)
+          setClaudeMdTemplateId((current) =>
+            current && globals.some((template) => template.id === current)
+              ? current
+              : globals[0]?.id ?? ''
+          )
+          setClaudeMdTemplateError('')
+        })
+        .catch((error: unknown) => {
+          if (claudeMdTemplateLoadId.current === id) {
+            setClaudeMdTemplateError(error instanceof Error ? error.message : String(error))
+          }
+        })
+        .finally(() => {
+          if (claudeMdTemplateLoadId.current === id) {
+            setClaudeMdTemplatesLoading(false)
+          }
+        })
+    }
+    claudeMdManagerWasOpen.current = templateManagerOpen
+  }, [templateManagerOpen, open])
+
+  useEffect(() => {
+    if (claudeMdEditorWasOpen.current && !claudeMdEditor) {
+      setClaudeMdReload((value) => value + 1)
+    }
+    claudeMdEditorWasOpen.current = Boolean(claudeMdEditor)
+  }, [claudeMdEditor])
 
   if (!open) return null
 
@@ -90,8 +242,89 @@ export default function SettingsDialog(): React.JSX.Element | null {
     }
   }
 
+  function closeSettings(): void {
+    if (!claudeMdBusy) setSettingsOpen(false)
+  }
+
+  const selectedGlobalTemplate =
+    claudeMdTemplates.find((template) => template.id === claudeMdTemplateId) ?? null
+
+  const writeGlobalTemplate = async (
+    template: ClaudeMdTemplate,
+    mode: 'replace' | 'merge',
+    confirmed = false
+  ): Promise<void> => {
+    if (claudeMdBusy) return
+    setClaudeMdBusy(true)
+    try {
+      const current = await window.api.readClaudeMd('global')
+      setClaudeMd(current)
+      setClaudeMdError('')
+      const plan = planClaudeMdApply(current, template, mode)
+      if (plan.needsConfirm && !confirmed) {
+        setConfirmApply({ template, mode })
+        return
+      }
+      if (plan.noop) {
+        setClaudeMdStatus('模板内容已全部存在，未做修改')
+        return
+      }
+
+      const result = await window.api.writeClaudeMd({
+        scope: 'global',
+        content: plan.content
+      })
+      if (!result.ok) throw new Error(result.message ?? '保存失败')
+      setClaudeMd({
+        scope: 'global',
+        path: result.path,
+        exists: true,
+        content: plan.content
+      })
+      setClaudeMdError('')
+      setClaudeMdStatus(
+        result.changed
+          ? mode === 'merge'
+            ? `已追加 ${plan.added} 个小节，跳过 ${plan.skipped} 个已存在小节`
+            : `已应用「${template.name}」全文`
+          : '文件内容没有变化'
+      )
+      if (result.changed) {
+        showToast({
+          kind: 'success',
+          message: result.created
+            ? `已创建：${result.path}`
+            : `已保存：${result.path}${result.backupPath ? `；备份：${result.backupPath}` : ''}`
+        })
+      } else {
+        showToast({ kind: 'success', message: result.message ?? '文件内容没有变化' })
+      }
+    } catch (error) {
+      setClaudeMdStatus('')
+      showToast({
+        kind: 'error',
+        message: `应用模板失败：${error instanceof Error ? error.message : String(error)}`
+      })
+    } finally {
+      setClaudeMdBusy(false)
+    }
+  }
+
+  const applyGlobalTemplate = (): void => {
+    if (
+      !selectedGlobalTemplate ||
+      claudeMdBusy ||
+      claudeMdLoading ||
+      Boolean(claudeMdError) ||
+      claudeMdTemplatesLoading ||
+      Boolean(claudeMdTemplateError)
+    ) return
+    void writeGlobalTemplate(selectedGlobalTemplate, claudeMdMode)
+  }
+
   return (
-    <div className="overlay" onMouseDown={() => setSettingsOpen(false)}>
+    <>
+      <div className="overlay" onMouseDown={() => closeSettings()}>
       <div
         className="dialog settings-dialog"
         ref={dialogRef} role="dialog" aria-modal="true" aria-label="设置" tabIndex={-1}
@@ -258,24 +491,149 @@ export default function SettingsDialog(): React.JSX.Element | null {
           </button>
         </div>
 
+        <div className="claude-md-settings">
+          <span>CLAUDE.md 全局规则</span>
+          <div className="settings-path">
+            {claudeMd?.path ?? (claudeMdLoading ? '读取中…' : '未知')}
+          </div>
+          <small className="dialog-hint" role="status" aria-live="polite">
+            {claudeMdError
+              ? <span className="dialog-warning">读取失败：{claudeMdError}</span>
+              : claudeMd?.exists
+                ? '已存在'
+                : '尚未创建，应用模板后将创建'}
+            {claudeMdStatus ? ` · ${claudeMdStatus}` : ''}
+          </small>
+          {claudeMdError && (
+            <button
+              className="btn"
+              onClick={() => setClaudeMdReload((value) => value + 1)}
+            >
+              重试读取
+            </button>
+          )}
+
+          <label className="settings-field" style={{ marginTop: 6 }}>
+            <span>模板</span>
+            <select
+              value={claudeMdTemplateId}
+              disabled={claudeMdBusy || claudeMdLoading || Boolean(claudeMdError) || claudeMdTemplatesLoading || Boolean(claudeMdTemplateError)}
+              onChange={(event) => setClaudeMdTemplateId(event.target.value)}
+            >
+              {claudeMdTemplates.length === 0 && <option value="">没有可用模板</option>}
+              {claudeMdTemplates.map((template) => (
+                <option key={template.id} value={template.id}>
+                  {template.name}{template.builtin ? '（内置）' : ''}
+                </option>
+              ))}
+            </select>
+          </label>
+          {claudeMdTemplateError && (
+            <>
+              <small className="dialog-hint dialog-warning">
+                读取模板失败：{claudeMdTemplateError}
+              </small>
+              <button
+                className="btn"
+                onClick={() => setClaudeMdReload((value) => value + 1)}
+              >
+                重试读取模板
+              </button>
+            </>
+          )}
+
+          <div className="claude-md-mode">
+            <label>
+              <input
+                type="radio"
+                name="claude-md-mode"
+                checked={claudeMdMode === 'replace'}
+                disabled={claudeMdBusy}
+                onChange={() => setClaudeMdMode('replace')}
+              />
+              全量替换
+            </label>
+            <label>
+              <input
+                type="radio"
+                name="claude-md-mode"
+                checked={claudeMdMode === 'merge'}
+                disabled={claudeMdBusy}
+                onChange={() => setClaudeMdMode('merge')}
+              />
+              增量添加
+            </label>
+          </div>
+
+          <div className="claude-md-actions">
+            <button
+              className="btn"
+              disabled={
+                !selectedGlobalTemplate ||
+                claudeMdBusy ||
+                claudeMdLoading ||
+                Boolean(claudeMdError) ||
+                claudeMdTemplatesLoading ||
+                Boolean(claudeMdTemplateError)
+              }
+              onClick={applyGlobalTemplate}
+            >
+              {claudeMdBusy ? '应用中…' : '应用到文件'}
+            </button>
+            <button
+              className="btn"
+              disabled={claudeMdBusy}
+              onClick={() => openClaudeMdEditor({ scope: 'global' })}
+            >
+              编辑全局 CLAUDE.md
+            </button>
+            <button
+              className="btn"
+              disabled={claudeMdBusy}
+              onClick={() => setTemplateManagerOpen(true, 'global')}
+            >
+              管理模板…
+            </button>
+          </div>
+        </div>
+
         <p className="dialog-hint">
           历史记录设置只影响本应用是否加载和展示，不会删除 Claude 的
           history.jsonl。
         </p>
 
         <div className="dialog-actions">
-          <button className="btn" onClick={() => setSettingsOpen(false)}>
+          <button className="btn" disabled={saving || claudeMdBusy} onClick={closeSettings}>
             取消
           </button>
           <button
             className="btn primary"
-            disabled={saving}
+            disabled={saving || claudeMdBusy}
             onClick={() => void save()}
           >
             {saving ? '保存中…' : '保存'}
           </button>
         </div>
       </div>
-    </div>
+      </div>
+
+      {confirmApply && (
+        <ConfirmDialog
+          title="应用全局模板"
+          confirmLabel="替换"
+          message={
+            <p>
+              将用「{confirmApply.template.name}」全文替换现有的全局 CLAUDE.md，旧内容会自动备份。
+            </p>
+          }
+          onCancel={() => setConfirmApply(null)}
+          onConfirm={() => {
+            const pending = confirmApply
+            setConfirmApply(null)
+            if (pending) void writeGlobalTemplate(pending.template, pending.mode, true)
+          }}
+        />
+      )}
+    </>
   )
 }

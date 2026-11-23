@@ -12,16 +12,29 @@ Windows 上的 Claude Code 会话工作台。[GitHub 仓库](https://github.com/
 
 ## 直接使用
 
-当前版本为 **1.1.7**，新增定时任务，并用 Claude Code hooks 提升会话状态识别准确度。
+当前版本为 **1.2.0**，新增 CLAUDE.md 模板与全局/项目规则编辑，以及 Git 变更面板。
 
 发布的 EXE 请从 [Releases 页面](https://github.com/wj497840823/claude-session-desk/releases) 下载。本地构建输出为：
 
 ```
-便携版：dist/ClaudeSessionDesk-1.1.7-portable.exe
-安装包：dist/ClaudeSessionDesk-1.1.7-setup.exe
+便携版：dist/ClaudeSessionDesk-1.2.0-portable.exe
+安装包：dist/ClaudeSessionDesk-1.2.0-setup.exe
 ```
 
 安装包按当前用户安装，可选择安装目录，并创建开始菜单和桌面快捷方式。便携版双击即可运行，无需安装。首次运行 Windows 可能提示 SmartScreen（未签名应用），选择「更多信息 → 仍要运行」即可。
+
+## 1.2.0：CLAUDE.md 模板与 Git 变更面板
+
+- 内置 9 个 CLAUDE.md 模板：3 个全局模板和 6 个项目模板，安装后即可使用。
+- 设置对话框新增「CLAUDE.md 全局规则」：可选择模板、全量替换或按标题增量添加，并直接编辑全局 `~/.claude/CLAUDE.md`。
+- 项目右键菜单新增「编辑 CLAUDE.md」：在应用内编辑项目根目录的 CLAUDE.md，同样支持 6 个项目模板、全量替换和增量添加。
+- 完整模板管理：内置模板只读，可复制为自定义模板；支持新建、编辑、删除和导入 `.md` 模板。
+- 覆盖已有文件前自动生成 `CLAUDE.md.bak-YYYYMMDD-HHmmss` 备份；增量添加按标题去重，重复应用不会堆叠重复内容。
+- 模板文件超过 1 MiB、名称/说明超长或项目目录不存在时给出明确错误提示。
+- 项目栏新增 Git 变更徽章；点击打开右侧面板，查看分支、上游差异，以及冲突/已暂存/未暂存/未跟踪文件。
+- 展开文件可查看 unified diff；支持暂存、取消暂存、全部暂存/取消暂存，以及提交已暂存内容。
+- 冲突文件可标记为已解决；提交时可选择跳过 Git 钩子，钩子失败会展示原始输出。
+- 项目不是 Git 仓库或未安装 Git 时不显示徽章，面板会说明原因。
 
 ## 1.1.7：定时任务与 hooks 状态识别
 

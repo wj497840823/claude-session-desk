@@ -10,6 +10,53 @@ export type TerminalPermissionMode =
 export type AppTheme = 'system' | 'light' | 'dark'
 export type SessionClickAction = 'continue' | 'record'
 
+export type ClaudeMdScope = 'global' | 'project'
+
+export interface ClaudeMdFileInfo {
+  scope: ClaudeMdScope
+  path: string
+  exists: boolean
+  content: string
+}
+
+export interface ClaudeMdSaveInput {
+  scope: ClaudeMdScope
+  projectKey?: string
+  content: string
+}
+
+export interface ClaudeMdSaveResult extends ActionResult {
+  path: string
+  backupPath?: string
+  created: boolean
+  changed: boolean
+}
+
+export interface ClaudeMdTemplate {
+  id: string
+  name: string
+  description: string
+  scope: ClaudeMdScope
+  content: string
+  builtin: boolean
+  createdAt?: number
+  updatedAt?: number
+}
+
+export interface ClaudeMdTemplateInput {
+  id?: string
+  name: string
+  description?: string
+  scope: ClaudeMdScope
+  content: string
+}
+
+export interface ClaudeMdMergeResult {
+  content: string
+  added: string[]
+  skipped: string[]
+}
+
 export interface AppSettings {
   loadHistory: boolean
   minimizeToTray: boolean
@@ -293,6 +340,73 @@ export interface BatchDeleteResult extends ActionResult {
   failedKeys: string[]
 }
 
+export type GitChangeKind =
+  | 'modified'
+  | 'added'
+  | 'deleted'
+  | 'renamed'
+  | 'copied'
+  | 'typechange'
+
+export type GitDiffGroup = 'staged' | 'unstaged' | 'untracked' | 'conflict'
+
+export interface GitFileEntry {
+  path: string
+  origPath?: string
+  indexKind: GitChangeKind | null
+  worktreeKind: GitChangeKind | null
+  untracked?: boolean
+  conflict?: boolean
+  stagedAdditions?: number
+  stagedDeletions?: number
+  worktreeAdditions?: number
+  worktreeDeletions?: number
+  binary?: boolean
+}
+
+export interface GitStatus {
+  projectKey: string
+  isRepo: boolean
+  repoRoot?: string
+  branch: string | null
+  oid: string | null
+  detached: boolean
+  upstream: string | null
+  ahead: number
+  behind: number
+  files: GitFileEntry[]
+  counts: {
+    files: number
+    staged: number
+    unstaged: number
+    untracked: number
+    unmerged: number
+    modified: number
+    added: number
+    deleted: number
+    renamed: number
+  }
+  truncated: boolean
+  error?: {
+    code: 'not-a-repo' | 'git-missing' | 'timeout' | 'failed'
+    message: string
+  }
+  scannedAt: number
+}
+
+export interface GitDiff {
+  path: string
+  diff: string
+  binary: boolean
+  truncated: boolean
+  additions: number
+  deletions: number
+}
+
+export interface GitCommitResult extends ActionResult {
+  commit?: string
+}
+
 export interface ClaudeViewApi {
   pickAttachments(context: FileContext): Promise<Attachment[]>
   attachDroppedFiles(context: FileContext, files: unknown[]): Promise<Attachment[]>
@@ -340,6 +454,21 @@ export interface ClaudeViewApi {
   listScheduledTaskRuns(id: string): Promise<ScheduledTaskRun[]>
   readScheduledTaskLog(id: string, runId: string): Promise<ScheduledTaskLog>
   onSchedulesChanged(callback: () => void): () => void
+  readClaudeMd(scope: ClaudeMdScope, projectKey?: string): Promise<ClaudeMdFileInfo>
+  writeClaudeMd(input: ClaudeMdSaveInput): Promise<ClaudeMdSaveResult>
+  listClaudeMdTemplates(): Promise<ClaudeMdTemplate[]>
+  saveClaudeMdTemplate(input: ClaudeMdTemplateInput): Promise<ClaudeMdTemplate>
+  deleteClaudeMdTemplate(id: string): Promise<void>
+  importClaudeMdTemplate(scope: ClaudeMdScope): Promise<ClaudeMdTemplate | null>
+  getGitStatus(projectKey: string, force?: boolean): Promise<GitStatus>
+  getGitStatuses(projectKeys: string[]): Promise<GitStatus[]>
+  getGitDiff(projectKey: string, path: string, group: GitDiffGroup): Promise<GitDiff>
+  gitFileAction(projectKey: string, path: string, action: 'open' | 'reveal'): Promise<ActionResult>
+  stageGitFile(projectKey: string, path: string): Promise<ActionResult>
+  unstageGitFile(projectKey: string, path: string): Promise<ActionResult>
+  stageAllGit(projectKey: string): Promise<ActionResult>
+  unstageAllGit(projectKey: string): Promise<ActionResult>
+  commitGit(projectKey: string, message: string, skipHooks: boolean): Promise<GitCommitResult>
   updateSettings(patch: Partial<AppSettings>): Promise<AppSettings>
   onDataChanged(callback: () => void): () => void
 }

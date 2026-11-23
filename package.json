@@ -1,6 +1,6 @@
 {
   "name": "claude-session-desk",
-  "version": "1.1.7",
+  "version": "1.2.0",
   "description": "Browse and resume local Claude Code sessions",
   "main": "./out/main/index.js",
   "author": "local",

@@ -6,11 +6,15 @@ import ProjectRail from './components/ProjectRail'
 import SearchResults from './components/SearchResults'
 import SettingsDialog from './components/SettingsDialog'
 import ScheduledTasksDialog from './components/ScheduledTasksDialog'
+import ClaudeMdEditorDialog from './components/ClaudeMdEditorDialog'
+import GitPanel from './components/GitPanel'
+import TemplateManagerDialog from './components/TemplateManagerDialog'
 import TerminalStartDialog from './components/TerminalStartDialog'
 import Toast from './components/Toast'
 import TopBar from './components/TopBar'
 import WorkspacePane from './components/WorkspacePane'
 import { loadSnapshot, refreshSnapshot } from './lib/actions'
+import { activeProjectKeys, refreshGitStatuses } from './lib/git'
 import { saveOpenTabs } from './lib/openTabs'
 import { useStore } from './store'
 import { fitPanelWidths } from './lib/panelLayout'
@@ -48,6 +52,8 @@ export default function App(): React.JSX.Element {
   const terminals = useStore((state) => state.terminals)
   const activeTab = useStore((state) => state.activeTab)
   const attention = useStore((state) => state.attention)
+  const archived = useStore((state) => state.archived)
+  const gitPanelProject = useStore((state) => state.gitPanelProject)
   const [viewportWidth, setViewportWidth] = useState(window.innerWidth)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const showSearchResults = Boolean(query.trim()) && !sessionListCollapsed
@@ -169,6 +175,31 @@ export default function App(): React.JSX.Element {
       approval: values.filter((kind) => kind === 'approval').length
     }).catch(() => undefined)
   }, [attention])
+
+  useEffect(() => {
+    const refresh = (): void => {
+      if (document.visibilityState !== 'visible') return
+      const state = useStore.getState()
+      void refreshGitStatuses(activeProjectKeys(state.snapshot, state.archived))
+    }
+    refresh()
+    const timer = window.setInterval(refresh, 30000)
+    window.addEventListener('focus', refresh)
+    return () => {
+      window.clearInterval(timer)
+      window.removeEventListener('focus', refresh)
+    }
+  }, [snapshot?.scannedAt, archived])
+
+  useEffect(() => {
+    if (
+      gitPanelProject &&
+      snapshot &&
+      !snapshot.projects.some((project) => project.key === gitPanelProject)
+    ) {
+      useStore.getState().closeGitPanel()
+    }
+  }, [gitPanelProject, snapshot])
 
   useEffect(() => {
     if (
@@ -301,7 +332,10 @@ export default function App(): React.JSX.Element {
       </div>
       <TerminalStartDialog />
       <SettingsDialog />
+      <ClaudeMdEditorDialog />
+      <TemplateManagerDialog />
       <ScheduledTasksDialog />
+      <GitPanel />
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
       <Toast />
     </div>

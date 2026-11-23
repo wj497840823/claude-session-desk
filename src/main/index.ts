@@ -22,6 +22,8 @@ import { ScheduledTaskService } from './scheduledTasks'
 import { watchDataRoot } from './watcher'
 import { externalWebUrl } from './validation'
 import { FileService } from './files'
+import { ClaudeMdService } from './claudeMd'
+import { GitService } from './git'
 
 app.setPath('userData', process.env.CLAUDE_SESSION_MANAGER_USER_DATA ||
   join(app.getPath('appData'), 'claude-session-manager'))
@@ -91,6 +93,13 @@ const scheduledTasks = new ScheduledTaskService({
 const files = new FileService(app.getPath('userData'), dataRoot,
   (context) => services.getFileScope(context, context?.sessionId ? terminal.getFileContext(context.sessionId) : undefined),
   () => mainWindow)
+const claudeMd = new ClaudeMdService({
+  userData: app.getPath('userData'),
+  resolveProjectPath: (projectKey) => services.getProjectPath(projectKey)
+})
+const git = new GitService({
+  resolveProjectPath: (projectKey) => services.getProjectPath(projectKey)
+})
 terminal.setScheduledSessionGuard((sessionId) => scheduledTasks.isSessionRunning(sessionId))
 let stopWatching: (() => void) | null = null
 let watchErrorNotified = false
@@ -314,7 +323,17 @@ if (!gotSingleInstanceLock) {
     minimizeToTray = settings.minimizeToTray
     desktopNotifications = settings.desktopNotifications
     nativeTheme.themeSource = settings.theme
-    registerIpc(services, terminal, files, applySettings, showMainWindow, applyAttention, scheduledTasks)
+    registerIpc(
+      services,
+      terminal,
+      files,
+      applySettings,
+      showMainWindow,
+      applyAttention,
+      scheduledTasks,
+      claudeMd,
+      git
+    )
     void hookRelay.start().then((started) => {
       if (started) terminal.setHookRelay(hookRelay)
     })

@@ -49,7 +49,7 @@ async function readJson<T>(filePath: string, fallback: T): Promise<T> {
   }
 }
 
-async function writeJsonAtomic(filePath: string, value: unknown): Promise<void> {
+export async function writeJsonAtomic(filePath: string, value: unknown): Promise<void> {
   await mkdir(dirname(filePath), { recursive: true })
   const tempPath = `${filePath}.${randomUUID()}.tmp`
   try {

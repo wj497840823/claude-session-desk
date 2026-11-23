@@ -61,7 +61,33 @@ const api: ClaudeViewApi = {
       ipcRenderer.removeListener(IPC.schedulesChanged, listener)
     }
   },
+  getGitStatus: (projectKey, force) =>
+    ipcRenderer.invoke(IPC.gitStatus, projectKey, force),
+  getGitStatuses: (projectKeys) =>
+    ipcRenderer.invoke(IPC.gitStatusBatch, projectKeys),
+  getGitDiff: (projectKey, path, group) =>
+    ipcRenderer.invoke(IPC.gitDiff, projectKey, path, group),
+  gitFileAction: (projectKey, path, action) =>
+    ipcRenderer.invoke(IPC.gitFileAction, projectKey, path, action),
+  stageGitFile: (projectKey, path) =>
+    ipcRenderer.invoke(IPC.gitStageFile, projectKey, path),
+  unstageGitFile: (projectKey, path) =>
+    ipcRenderer.invoke(IPC.gitUnstageFile, projectKey, path),
+  stageAllGit: (projectKey) => ipcRenderer.invoke(IPC.gitStageAll, projectKey),
+  unstageAllGit: (projectKey) => ipcRenderer.invoke(IPC.gitUnstageAll, projectKey),
+  commitGit: (projectKey, message, skipHooks) =>
+    ipcRenderer.invoke(IPC.gitCommit, projectKey, message, skipHooks),
   updateSettings: (patch) => ipcRenderer.invoke(IPC.settingsUpdate, patch),
+  readClaudeMd: (scope, projectKey) =>
+    ipcRenderer.invoke(IPC.claudeMdRead, scope, projectKey),
+  writeClaudeMd: (input) => ipcRenderer.invoke(IPC.claudeMdWrite, input),
+  listClaudeMdTemplates: () => ipcRenderer.invoke(IPC.claudeMdTemplatesList),
+  saveClaudeMdTemplate: (input) =>
+    ipcRenderer.invoke(IPC.claudeMdTemplateSave, input),
+  deleteClaudeMdTemplate: (id) =>
+    ipcRenderer.invoke(IPC.claudeMdTemplateDelete, id),
+  importClaudeMdTemplate: (scope) =>
+    ipcRenderer.invoke(IPC.claudeMdTemplateImport, scope),
   onTerminalData: (callback) => {
     const listener = (_event: unknown, payload: { ptyId: string; data: string }): void => {
       callback(payload)

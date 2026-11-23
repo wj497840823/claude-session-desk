@@ -3,8 +3,10 @@ import {
   ChevronDown,
   ChevronRight,
   Clock,
+  FileText,
   Folder,
   FolderOpen,
+  GitBranch,
   Layers,
   MessageSquarePlus,
   Plus,
@@ -50,6 +52,9 @@ export default function ProjectRail(): React.JSX.Element {
   const openTerminalDialog = useStore((state) => state.openTerminalDialog)
   const showToast = useStore((state) => state.showToast)
   const setScheduledTasksOpen = useStore((state) => state.setScheduledTasksOpen)
+  const openClaudeMdEditor = useStore((state) => state.openClaudeMdEditor)
+  const gitStatuses = useStore((state) => state.gitStatuses)
+  const openGitPanel = useStore((state) => state.openGitPanel)
   const archived = useStore((state) => state.archived)
   const terminals = useStore((state) => state.terminals)
   const terminalStatus = useStore((state) => state.terminalStatus)
@@ -217,6 +222,15 @@ export default function ProjectRail(): React.JSX.Element {
     void openProject(project.key)
   }
 
+  const handleEditClaudeMd = (project: ProjectSummary): void => {
+    closeContextMenu()
+    openClaudeMdEditor({
+      scope: 'project',
+      projectKey: project.key,
+      projectName: project.name
+    })
+  }
+
   const queueDeleteSession = (session: SessionSummary): void => {
     closeContextMenu()
     setPendingDelete({ kind: 'session', session })
@@ -225,6 +239,30 @@ export default function ProjectRail(): React.JSX.Element {
   const queueDeleteProject = (project: ProjectSummary): void => {
     closeContextMenu()
     setPendingDelete({ kind: 'project', project })
+  }
+
+  const gitBadge = (projectKey: string): React.JSX.Element | null => {
+    const status = gitStatuses[projectKey]
+    if (!status?.isRepo || status.counts.files === 0) return null
+    const kind =
+      status.counts.unmerged > 0
+        ? 'conflict'
+        : status.counts.staged + status.counts.unstaged > 0
+          ? 'tracked'
+          : 'untracked'
+    return (
+      <button
+        className={`rail-git-badge ${kind}`}
+        title={`已暂存 ${status.counts.staged} · 未暂存 ${status.counts.unstaged} · 未跟踪 ${status.counts.untracked} · 冲突 ${status.counts.unmerged}`}
+        aria-label={`查看 Git 变更，共 ${status.counts.files} 个文件`}
+        onClick={(event) => {
+          event.stopPropagation()
+          openGitPanel(projectKey)
+        }}
+      >
+        ●{status.counts.files}
+      </button>
+    )
   }
 
   return (
@@ -362,6 +400,7 @@ export default function ProjectRail(): React.JSX.Element {
                 )}
                 <span className="rail-count">{visibleCountFor(project.key)}</span>
               </button>
+              {gitBadge(project.key)}
               {project.path && (
                 <button
                   className="rail-project-open rail-project-chat"
@@ -472,8 +511,8 @@ export default function ProjectRail(): React.JSX.Element {
             className="context-menu"
             role="menu"
             style={{
-              left: Math.min(contextMenu.x, window.innerWidth - 280),
-              top: Math.min(contextMenu.y, window.innerHeight - 300)
+              left: Math.max(8, Math.min(contextMenu.x, window.innerWidth - 320)),
+              top: Math.max(8, Math.min(contextMenu.y, window.innerHeight - 430))
             }}
             onContextMenu={(event) => event.preventDefault()}
           >
@@ -491,9 +530,29 @@ export default function ProjectRail(): React.JSX.Element {
               <FolderOpen size={14} />
               在文件夹中打开
             </button>
+            <button
+              role="menuitem"
+              disabled={!contextMenu.project.path}
+              onClick={() => handleEditClaudeMd(contextMenu.project)}
+            >
+              <FileText size={14} />
+              编辑 CLAUDE.md
+            </button>
+            <button
+              role="menuitem"
+              onClick={() => {
+                openGitPanel(contextMenu.project.key)
+                closeContextMenu()
+              }}
+            >
+              <GitBranch size={14} />
+              查看 Git 变更
+            </button>
             <div className="context-separator" />
             <button
               role="menuitem"
+              aria-haspopup="menu"
+              aria-expanded={deleteSessionsOpen}
               disabled={contextSessions.length === 0}
               onClick={() => setDeleteSessionsOpen((open) => !open)}
             >
@@ -508,7 +567,7 @@ export default function ProjectRail(): React.JSX.Element {
               </span>
             </button>
             {deleteSessionsOpen && contextSessions.length > 0 && (
-              <div className="context-submenu">
+              <div className="context-submenu" role="menu">
                 {contextSessions.map((session) => (
                   <button
                     key={session.key}

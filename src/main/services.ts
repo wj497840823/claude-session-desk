@@ -118,6 +118,12 @@ export class AppServices {
     return index.snapshot
   }
 
+  async getProjectPath(projectKey: string): Promise<string | null> {
+    const index = await this.ensureIndex()
+    const project = index.snapshot.projects.find((item) => item.key === projectKey)
+    return index.projectPaths[projectKey] || project?.path || null
+  }
+
   async getFileScope(context: FileContext, active?: FileScope): Promise<FileScope> {
     if (!context || typeof context !== 'object') throw new Error('非法文件上下文')
     if (context.sessionKey) {

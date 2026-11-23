@@ -1,5 +1,7 @@
 import { create } from 'zustand'
 import type {
+  ClaudeMdScope,
+  GitStatus,
   HistoryDetail,
   SearchResponse,
   SessionDetail,
@@ -92,6 +94,12 @@ export interface TerminalDialogRequest {
   sessionTitle?: string
 }
 
+export interface ClaudeMdEditorRequest {
+  scope: ClaudeMdScope
+  projectKey?: string
+  projectName?: string
+}
+
 export interface TerminalSession {
   key: string
   cwd: string
@@ -141,6 +149,11 @@ interface AppState {
   sessionListWidth: number
   settingsOpen: boolean
   scheduledTasksOpen: boolean
+  claudeMdEditor: ClaudeMdEditorRequest | null
+  templateManagerOpen: boolean
+  templateManagerScope: ClaudeMdScope
+  gitStatuses: Record<string, GitStatus>
+  gitPanelProject: string | null
   setSnapshot: (snapshot: Snapshot) => void
   setLoading: (loading: boolean) => void
   setRefreshing: (refreshing: boolean) => void
@@ -184,6 +197,12 @@ interface AppState {
   setSessionListWidth: (width: number) => void
   setSettingsOpen: (open: boolean) => void
   setScheduledTasksOpen: (open: boolean) => void
+  openClaudeMdEditor: (request: ClaudeMdEditorRequest) => void
+  closeClaudeMdEditor: () => void
+  setTemplateManagerOpen: (open: boolean, scope?: ClaudeMdScope) => void
+  setGitStatuses: (statuses: GitStatus[]) => void
+  openGitPanel: (projectKey: string) => void
+  closeGitPanel: () => void
 }
 
 function terminalNavigation(state: AppState, terminal: TerminalSession, changeView = true): Partial<AppState> {
@@ -269,6 +288,11 @@ export const useStore = create<AppState>()((set) => ({
   sessionListWidth: storedWidth('csm.sessionListWidth', 340, 240, 640),
   settingsOpen: false,
   scheduledTasksOpen: false,
+  claudeMdEditor: null,
+  templateManagerOpen: false,
+  templateManagerScope: 'global',
+  gitStatuses: {},
+  gitPanelProject: null,
   setSnapshot: (snapshot) =>
     set((state) => {
       const active = state.terminals.find((tab) => tab.key === state.activeTab)
@@ -477,5 +501,20 @@ export const useStore = create<AppState>()((set) => ({
     set({ sessionListWidth })
   },
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
-  setScheduledTasksOpen: (scheduledTasksOpen) => set({ scheduledTasksOpen })
+  setScheduledTasksOpen: (scheduledTasksOpen) => set({ scheduledTasksOpen }),
+  openClaudeMdEditor: (claudeMdEditor) => set({ claudeMdEditor }),
+  closeClaudeMdEditor: () => set({ claudeMdEditor: null }),
+  setTemplateManagerOpen: (templateManagerOpen, scope) =>
+    set((state) => ({
+      templateManagerOpen,
+      templateManagerScope: scope ?? state.templateManagerScope
+    })),
+  setGitStatuses: (statuses) =>
+    set((state) => {
+      const gitStatuses = { ...state.gitStatuses }
+      for (const status of statuses) gitStatuses[status.projectKey] = status
+      return { gitStatuses }
+    }),
+  openGitPanel: (gitPanelProject) => set({ gitPanelProject }),
+  closeGitPanel: () => set({ gitPanelProject: null })
 }))

@@ -565,6 +565,20 @@ app.on('web-contents-created', (_event, contents) => {
     await js(`window.api.deleteScheduledTask(${JSON.stringify(existingTask.id)})`)
     checks.push('Scheduled Claude tasks can target an existing session')
 
+    const claudeMdBefore = await js(`window.api.readClaudeMd('project', 'demo')`)
+    assert.equal(claudeMdBefore.exists, false)
+    const claudeMdWrite = await js(`window.api.writeClaudeMd(${JSON.stringify({
+      scope: 'project',
+      projectKey: 'demo',
+      content: '# Smoke Rules\n\n## Section\n\nBody.\n'
+    })})`)
+    assert(claudeMdWrite.ok && claudeMdWrite.created)
+    const claudeMdAfter = await js(`window.api.readClaudeMd('project', 'demo')`)
+    assert(claudeMdAfter.content.includes('Smoke Rules'))
+    const claudeMdTemplates = await js(`window.api.listClaudeMdTemplates()`)
+    assert(claudeMdTemplates.some((template) => template.id === 'builtin:project:04-code-review'))
+    checks.push('CLAUDE.md project editing and built-in templates work end to end')
+
     if (process.env.CSM_NAV_SCREENSHOT) {
       win.setSize(1280, 800)
       await delay(100)
