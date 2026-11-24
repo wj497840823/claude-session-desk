@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import { Settings2 } from 'lucide-react'
 import type {
   ClaudeMdFileInfo,
+  ClaudeMdLocationInfo,
+  ClaudeMdPlacement,
   ClaudeMdScope,
   ClaudeMdTemplate
 } from '@shared/types'
@@ -48,9 +50,13 @@ function ClaudeMdEditor({ request }: { request: ClaudeMdEditorRequest }): React.
   const [templateError, setTemplateError] = useState('')
   const [status, setStatus] = useState('')
   const [reloadToken, setReloadToken] = useState(0)
+  const [placement, setPlacement] = useState<ClaudeMdPlacement>('root')
+  const [locations, setLocations] = useState<ClaudeMdLocationInfo[]>([])
+  const [pendingPlacement, setPendingPlacement] = useState<ClaudeMdPlacement | null>(null)
   const [confirmReplace, setConfirmReplace] = useState<ClaudeMdTemplate | null>(null)
   const [confirmDiscard, setConfirmDiscard] = useState(false)
   const managerWasOpen = useRef(false)
+  const firstLoad = useRef(true)
   const loadId = useRef(0)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const dialogRef = useDialog(true, () => requestCancel())
@@ -58,6 +64,7 @@ function ClaudeMdEditor({ request }: { request: ClaudeMdEditorRequest }): React.
   const visibleTemplates = templates.filter((template) => template.scope === request.scope)
   const selectedTemplate = visibleTemplates.find((template) => template.id === templateId)
   const dirty = buffer !== original
+  const bothExist = locations.length === 2 && locations.every((item) => item.exists)
 
   const loadTemplates = async (): Promise<void> => {
     const list = await window.api.listClaudeMdTemplates()
@@ -66,8 +73,49 @@ function ClaudeMdEditor({ request }: { request: ClaudeMdEditorRequest }): React.
     setTemplateError('')
   }
 
-  useEffect(() => {
+  const readPlacement = async (target: ClaudeMdPlacement): Promise<void> => {
     const id = ++loadId.current
+    setLoading(true)
+    setPlacement(target)
+    setInfo(null)
+    setOriginal('')
+    setBuffer('')
+    setStatus('')
+    setReadError('')
+    setConfirmReplace(null)
+    try {
+      const file = await window.api.readClaudeMd(
+        'project',
+        request.projectKey,
+        target
+      )
+      if (loadId.current !== id) return
+      setInfo(file)
+      setOriginal(file.content)
+      setBuffer(file.content)
+    } catch (error) {
+      if (loadId.current !== id) return
+      const message = error instanceof Error ? error.message : String(error)
+      setReadError(message)
+      setStatus(`读取失败：${message}`)
+    } finally {
+      if (loadId.current === id) setLoading(false)
+    }
+  }
+
+  const requestPlacement = (target: ClaudeMdPlacement): void => {
+    if (target === placement || loading || saving) return
+    if (dirty) {
+      setPendingPlacement(target)
+      return
+    }
+    void readPlacement(target)
+  }
+
+  useEffect(() => {
+    let cancelled = false
+    const initial = firstLoad.current
+    firstLoad.current = false
     setLoading(true)
     setInfo(null)
     setOriginal('')
@@ -78,38 +126,87 @@ function ClaudeMdEditor({ request }: { request: ClaudeMdEditorRequest }): React.
     setTemplateId('')
     setConfirmReplace(null)
     setConfirmDiscard(false)
+    setPendingPlacement(null)
 
-    void window.api.readClaudeMd(request.scope, request.projectKey)
-      .then((file) => {
-        if (loadId.current !== id) return
+    const read = async (target: ClaudeMdPlacement | undefined): Promise<void> => {
+      const id = ++loadId.current
+      if (target) setPlacement(target)
+      try {
+        const file = await window.api.readClaudeMd(
+          request.scope,
+          request.projectKey,
+          target
+        )
+        if (cancelled || loadId.current !== id) return
         setInfo(file)
         setOriginal(file.content)
         setBuffer(file.content)
-      })
-      .catch((error: unknown) => {
-        if (loadId.current !== id) return
+      } catch (error) {
+        if (cancelled || loadId.current !== id) return
         const message = error instanceof Error ? error.message : String(error)
         setReadError(message)
         setStatus(`读取失败：${message}`)
-      })
-      .finally(() => {
-        if (loadId.current === id) setLoading(false)
-      })
+      } finally {
+        if (!cancelled && loadId.current === id) setLoading(false)
+      }
+    }
+
+    const load = async (): Promise<void> => {
+      if (request.scope !== 'project') {
+        setLocations([])
+        await read(undefined)
+        return
+      }
+      if (!initial) {
+        void window.api.getClaudeMdLocations('project', request.projectKey)
+          .then((list) => {
+            if (!cancelled) setLocations(list)
+          })
+          .catch(() => undefined)
+        await read(placement)
+        return
+      }
+      try {
+        const list = await window.api.getClaudeMdLocations(
+          'project',
+          request.projectKey
+        )
+        if (cancelled) return
+        setLocations(list)
+        const root = list.find((item) => item.placement === 'root')
+        const claude = list.find((item) => item.placement === 'claude-dir')
+        const target: ClaudeMdPlacement = root?.exists
+          ? 'root'
+          : claude?.exists
+            ? 'claude-dir'
+            : 'root'
+        await read(target)
+      } catch (error) {
+        if (cancelled) return
+        const message = error instanceof Error ? error.message : String(error)
+        setReadError(message)
+        setStatus(`读取失败：${message}`)
+        setLoading(false)
+      }
+    }
+
+    void load()
 
     void window.api.listClaudeMdTemplates()
       .then((list) => {
-        if (loadId.current !== id) return
+        if (cancelled) return
         setTemplates(list)
         setTemplateId(nextScopedTemplateId(list, request.scope, ''))
       })
       .catch((error: unknown) => {
-        if (loadId.current !== id) return
+        if (cancelled) return
         setTemplateError(
           `读取模板失败：${error instanceof Error ? error.message : String(error)}`
         )
       })
 
     return () => {
+      cancelled = true
       loadId.current += 1
     }
   }, [request, reloadToken])
@@ -165,6 +262,7 @@ function ClaudeMdEditor({ request }: { request: ClaudeMdEditorRequest }): React.
       const result = await window.api.writeClaudeMd({
         scope: request.scope,
         projectKey: request.projectKey,
+        placement: request.scope === 'project' ? placement : undefined,
         content: buffer
       })
       if (!result.ok) throw new Error(result.message ?? '保存失败')
@@ -216,7 +314,28 @@ function ClaudeMdEditor({ request }: { request: ClaudeMdEditorRequest }): React.
             </span>
           </div>
 
+          {bothExist && (
+            <p className="dialog-hint">
+              项目根目录和 .claude 文件夹下都存在 CLAUDE.md，建议只保留一处，避免同一项目维护两份指令。
+            </p>
+          )}
+
           <div className="claude-md-toolbar">
+            {request.scope === 'project' && (
+              <label className="settings-field">
+                <span>位置</span>
+                <select
+                  value={placement}
+                  disabled={loading || saving}
+                  onChange={(event) =>
+                    requestPlacement(event.target.value as ClaudeMdPlacement)
+                  }
+                >
+                  <option value="root">项目根目录（CLAUDE.md）</option>
+                  <option value="claude-dir">.claude 文件夹（.claude/CLAUDE.md）</option>
+                </select>
+              </label>
+            )}
             <label className="settings-field">
               <span>模板</span>
               <select
@@ -312,6 +431,26 @@ function ClaudeMdEditor({ request }: { request: ClaudeMdEditorRequest }): React.
             setBuffer(confirmReplace.content)
             setStatus(`已应用「${confirmReplace.name}」全文，尚未保存`)
             setConfirmReplace(null)
+          }}
+        />
+      )}
+
+      {pendingPlacement && (
+        <ConfirmDialog
+          title="切换 CLAUDE.md 位置"
+          confirmLabel="切换"
+          message={
+            <p>
+              切换到「
+              {pendingPlacement === 'root' ? '项目根目录' : '.claude 文件夹'}
+              」将放弃当前未保存的修改。
+            </p>
+          }
+          onCancel={() => setPendingPlacement(null)}
+          onConfirm={() => {
+            const target = pendingPlacement
+            setPendingPlacement(null)
+            if (target) void readPlacement(target)
           }}
         />
       )}

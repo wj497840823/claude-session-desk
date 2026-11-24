@@ -5,6 +5,7 @@ import {
   type AppTheme,
   type ClaudeMdFileInfo,
   type ClaudeMdTemplate,
+  type LocalApiInfo,
   type SessionClickAction,
   type TerminalPermissionMode
 } from '@shared/types'
@@ -79,6 +80,7 @@ export default function SettingsDialog(): React.JSX.Element | null {
   const showToast = useStore((state) => state.showToast)
   const [draft, setDraft] = useState<AppSettings>(DEFAULT_APP_SETTINGS)
   const [saving, setSaving] = useState(false)
+  const [localApi, setLocalApi] = useState<LocalApiInfo | null>(null)
   const refreshing = useStore((state) => state.refreshing)
   const dialogRef = useDialog(open, () => closeSettings())
   const openClaudeMdEditor = useStore((state) => state.openClaudeMdEditor)
@@ -163,6 +165,17 @@ export default function SettingsDialog(): React.JSX.Element | null {
       cancelled = true
     }
   }, [open, claudeMdReload])
+
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    void window.api.getLocalApiInfo().then((info) => {
+      if (!cancelled) setLocalApi(info)
+    }).catch(() => {
+      if (!cancelled) setLocalApi(null)
+    })
+    return () => { cancelled = true }
+  }, [open, snapshot?.settings.localApiEnabled])
 
   useEffect(() => {
     if (!open) return
@@ -377,6 +390,53 @@ export default function SettingsDialog(): React.JSX.Element | null {
             </small>
           </span>
         </label>
+
+        <label className="settings-check">
+          <input
+            type="checkbox"
+            checked={draft.localApiEnabled}
+            onChange={(event) =>
+              update('localApiEnabled', event.target.checked)
+            }
+          />
+          <span>
+            <strong>启用本地 HTTP 接口</strong>
+            <small>
+              只监听 127.0.0.1，使用 Bearer Token。保存后可用于脚本查询状态、运行/暂停任务、回答审批与提问，以及提交外部事件。
+            </small>
+          </span>
+        </label>
+
+        {draft.localApiEnabled && (
+          <div className="settings-field local-api-info">
+            <span>接口地址</span>
+            <input
+              readOnly
+              value={localApi?.url ?? (localApi?.enabled ? '启动失败，请重新保存设置' : '保存后启动')}
+            />
+            {localApi?.token && (
+              <>
+                <span>Bearer Token</span>
+                <div className="scheduled-path-row">
+                  <input readOnly value={localApi.token} />
+                  <button
+                    className="btn"
+                    onClick={() => {
+                      void navigator.clipboard.writeText(localApi.token!)
+                        .then(() => showToast({ kind: 'success', message: 'Token 已复制' }))
+                        .catch(() => showToast({ kind: 'error', message: '复制失败' }))
+                    }}
+                  >
+                    复制
+                  </button>
+                </div>
+              </>
+            )}
+            <small className="dialog-hint">
+              示例：curl -H "Authorization: Bearer &lt;token&gt;" {localApi?.url ?? 'http://127.0.0.1:端口'}/v1/status
+            </small>
+          </div>
+        )}
 
         <label className="settings-check">
           <input

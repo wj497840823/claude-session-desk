@@ -136,6 +136,111 @@ describe('ClaudeMdService files', () => {
   })
 })
 
+describe('ClaudeMdService project placement', () => {
+  it('reads and writes .claude/CLAUDE.md when requested', async () => {
+    const { project, service } = await fixture()
+    const target = {
+      scope: 'project' as const,
+      projectKey: 'p1',
+      placement: 'claude-dir' as const
+    }
+    const before = await service.read(target)
+    expect(before.path).toBe(join(project, '.claude', 'CLAUDE.md'))
+    expect(before.exists).toBe(false)
+    expect(before.placement).toBe('claude-dir')
+
+    const result = await service.write({ ...target, content: '# Hidden\n' })
+    expect(result.ok).toBe(true)
+    expect(result.path).toBe(join(project, '.claude', 'CLAUDE.md'))
+    expect(await readFile(join(project, '.claude', 'CLAUDE.md'), 'utf8')).toBe('# Hidden\n')
+
+    const after = await service.read(target)
+    expect(after.exists).toBe(true)
+    expect(after.content).toBe('# Hidden\n')
+  })
+
+  it('keeps root and .claude files independent', async () => {
+    const { project, service } = await fixture()
+    await service.write({ scope: 'project', projectKey: 'p1', content: '# Root\n' })
+    await service.write({
+      scope: 'project',
+      projectKey: 'p1',
+      placement: 'claude-dir',
+      content: '# Hidden\n'
+    })
+    expect(await readFile(join(project, 'CLAUDE.md'), 'utf8')).toBe('# Root\n')
+    expect(await readFile(join(project, '.claude', 'CLAUDE.md'), 'utf8')).toBe('# Hidden\n')
+    expect((await service.read({ scope: 'project', projectKey: 'p1' })).content).toBe('# Root\n')
+    expect((await service.read({
+      scope: 'project',
+      projectKey: 'p1',
+      placement: 'claude-dir'
+    })).content).toBe('# Hidden\n')
+  })
+
+  it('backs up the selected .claude file in place', async () => {
+    const { project, service } = await fixture()
+    await service.write({
+      scope: 'project',
+      projectKey: 'p1',
+      placement: 'claude-dir',
+      content: 'old\n'
+    })
+    const result = await service.write({
+      scope: 'project',
+      projectKey: 'p1',
+      placement: 'claude-dir',
+      content: 'new\n'
+    })
+    expect(result.backupPath).toMatch(/\.claude[\\/]CLAUDE\.md\.bak-/)
+    expect(await readFile(result.backupPath!, 'utf8')).toBe('old\n')
+    expect(await readFile(join(project, '.claude', 'CLAUDE.md'), 'utf8')).toBe('new\n')
+  })
+
+  it('reports both project locations', async () => {
+    const { project, service } = await fixture()
+    let locations = await service.locations({ scope: 'project', projectKey: 'p1' })
+    expect(locations).toEqual([
+      { placement: 'root', path: join(project, 'CLAUDE.md'), exists: false },
+      { placement: 'claude-dir', path: join(project, '.claude', 'CLAUDE.md'), exists: false }
+    ])
+    await service.write({ scope: 'project', projectKey: 'p1', content: 'root\n' })
+    locations = await service.locations({ scope: 'project', projectKey: 'p1' })
+    expect(locations.map((item) => item.exists)).toEqual([true, false])
+    await service.write({
+      scope: 'project',
+      projectKey: 'p1',
+      placement: 'claude-dir',
+      content: 'hidden\n'
+    })
+    locations = await service.locations({ scope: 'project', projectKey: 'p1' })
+    expect(locations.map((item) => item.exists)).toEqual([true, true])
+    expect(await service.locations({ scope: 'global' })).toEqual([])
+  })
+
+  it('rejects an invalid placement', async () => {
+    const { service } = await fixture()
+    await expect(service.read({
+      scope: 'project',
+      projectKey: 'p1',
+      placement: 'bad' as never
+    })).rejects.toThrow('非法的 CLAUDE.md 位置')
+    await expect(service.write({
+      scope: 'project',
+      projectKey: 'p1',
+      placement: 'bad' as never,
+      content: 'x'
+    })).rejects.toThrow('非法的 CLAUDE.md 位置')
+  })
+
+  it('ignores placement for the global scope', async () => {
+    const { home, service } = await fixture()
+    const info = await service.read({ scope: 'global', placement: 'claude-dir' })
+    expect(info.path).toBe(join(home, '.claude', 'CLAUDE.md'))
+    expect(info.placement).toBeUndefined()
+  })
+})
+
 describe('ClaudeMdService templates', () => {
   it('lists built-in templates plus persisted custom templates', async () => {
     const { userData, service } = await fixture()

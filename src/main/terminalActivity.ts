@@ -1,4 +1,4 @@
-export type TerminalActivity = 'working' | 'idle' | 'approval'
+export type TerminalActivity = 'working' | 'idle' | 'approval' | 'background'
 
 export interface ActivitySignal {
   approval: boolean

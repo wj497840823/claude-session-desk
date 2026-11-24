@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import type { ClaudeViewApi } from '@shared/types'
+import type { ClaudeViewApi, TerminalActivityEvent } from '@shared/types'
 import { IPC } from '@shared/ipc'
 
 const api: ClaudeViewApi = {
@@ -45,6 +45,27 @@ const api: ClaudeViewApi = {
     ipcRenderer.invoke(IPC.terminalResize, ptyId, cols, rows),
   stopTerminal: (ptyId) => ipcRenderer.invoke(IPC.terminalStop, ptyId),
   updateAttention: (summary) => ipcRenderer.invoke(IPC.attentionUpdate, summary),
+  listInbox: () => ipcRenderer.invoke(IPC.inboxList),
+  dismissInboxItem: (id) => ipcRenderer.invoke(IPC.inboxDismiss, id),
+  listApprovals: () => ipcRenderer.invoke(IPC.approvalsList),
+  resolveApproval: (id, decision) =>
+    ipcRenderer.invoke(IPC.approvalsResolve, id, decision),
+  onApprovalsChanged: (callback) => {
+    const listener = (_event: unknown, requests: Parameters<typeof callback>[0]): void => {
+      callback(requests)
+    }
+    ipcRenderer.on(IPC.approvalsChanged, listener)
+    return () => {
+      ipcRenderer.removeListener(IPC.approvalsChanged, listener)
+    }
+  },
+  onApprovalsOpen: (callback) => {
+    const listener = (): void => callback()
+    ipcRenderer.on(IPC.approvalsOpen, listener)
+    return () => {
+      ipcRenderer.removeListener(IPC.approvalsOpen, listener)
+    }
+  },
   listScheduledTasks: () => ipcRenderer.invoke(IPC.schedulesList),
   createScheduledTask: (input) => ipcRenderer.invoke(IPC.schedulesCreate, input),
   updateScheduledTask: (id, input) => ipcRenderer.invoke(IPC.schedulesUpdate, id, input),
@@ -52,6 +73,15 @@ const api: ClaudeViewApi = {
   setScheduledTaskEnabled: (id, enabled) => ipcRenderer.invoke(IPC.schedulesEnable, id, enabled),
   runScheduledTask: (id) => ipcRenderer.invoke(IPC.schedulesRun, id),
   cancelScheduledTask: (id) => ipcRenderer.invoke(IPC.schedulesCancel, id),
+  pauseScheduledTask: (id, until, reason) =>
+    ipcRenderer.invoke(IPC.schedulesPause, id, until, reason),
+  resumeScheduledTask: (id) => ipcRenderer.invoke(IPC.schedulesResume, id),
+  replayScheduledTask: (id) => ipcRenderer.invoke(IPC.schedulesReplay, id),
+  answerScheduledAsk: (id, answer) =>
+    ipcRenderer.invoke(IPC.schedulesAnswerAsk, id, answer),
+  ignoreScheduledAsk: (id) => ipcRenderer.invoke(IPC.schedulesIgnoreAsk, id),
+  getUsageSummary: () => ipcRenderer.invoke(IPC.usageSummary),
+  getLocalApiInfo: () => ipcRenderer.invoke(IPC.localApiInfo),
   listScheduledTaskRuns: (id) => ipcRenderer.invoke(IPC.schedulesRuns, id),
   readScheduledTaskLog: (id, runId) => ipcRenderer.invoke(IPC.schedulesLog, id, runId),
   onSchedulesChanged: (callback) => {
@@ -78,8 +108,12 @@ const api: ClaudeViewApi = {
   commitGit: (projectKey, message, skipHooks) =>
     ipcRenderer.invoke(IPC.gitCommit, projectKey, message, skipHooks),
   updateSettings: (patch) => ipcRenderer.invoke(IPC.settingsUpdate, patch),
-  readClaudeMd: (scope, projectKey) =>
-    ipcRenderer.invoke(IPC.claudeMdRead, scope, projectKey),
+  setSessionRefreshInterest: (interest) =>
+    ipcRenderer.invoke(IPC.sessionRefreshInterest, interest),
+  readClaudeMd: (scope, projectKey, placement) =>
+    ipcRenderer.invoke(IPC.claudeMdRead, scope, projectKey, placement),
+  getClaudeMdLocations: (scope, projectKey) =>
+    ipcRenderer.invoke(IPC.claudeMdLocations, scope, projectKey),
   writeClaudeMd: (input) => ipcRenderer.invoke(IPC.claudeMdWrite, input),
   listClaudeMdTemplates: () => ipcRenderer.invoke(IPC.claudeMdTemplatesList),
   saveClaudeMdTemplate: (input) =>
@@ -112,7 +146,7 @@ const api: ClaudeViewApi = {
   onTerminalActivity: (callback) => {
     const listener = (
       _event: unknown,
-      payload: { ptyId: string; sessionId: string | null; activity: 'working' | 'idle' | 'approval' }
+      payload: TerminalActivityEvent
     ): void => {
       callback(payload)
     }

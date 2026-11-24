@@ -31,6 +31,7 @@ function tabState(
   if (status === 'starting') return { text: '启动中', short: 'S', kind: 'starting' }
   if (status === 'running') {
     if (activity === 'approval') return { text: '待确认', short: 'A', kind: 'approval' }
+    if (activity === 'background') return { text: '后台任务中', short: 'B', kind: 'background' }
     if (activity === 'idle') return { text: '完成', short: 'D', kind: 'idle' }
     if (activity === 'working') return { text: '工作中', short: 'W', kind: 'working' }
     return { text: '运行中', short: 'R', kind: 'running' }
@@ -300,14 +301,15 @@ export default function WorkspacePane(): React.JSX.Element {
         <button role="menuitem" className="danger" onClick={() => requestClose(terminals.map((tab) => tab.key))}>关闭全部对话</button>
       </div>}
 
-      <Suspense fallback={<div className="detail-empty" role="status">正在加载工作区…</div>}>
         <div className="workspace-content">
           {selectedKey && recordTabVisible && (
             <div
               className="workspace-record"
               style={{ display: effectiveTab === 'record' ? 'flex' : 'none' }}
             >
-              <SessionDetail />
+              <Suspense fallback={<div className="detail-empty" role="status">正在加载会话记录…</div>}>
+                <SessionDetail />
+              </Suspense>
             </div>
           )}
 
@@ -316,6 +318,7 @@ export default function WorkspacePane(): React.JSX.Element {
               className="workspace-terminal-views"
               style={{ display: effectiveTab === 'record' ? 'none' : 'flex' }}
             >
+              <Suspense fallback={<div className="detail-empty" role="status">正在加载对话终端…</div>}>
               {terminals.map((tab) => (
                 <TerminalTab
                   key={tab.key}
@@ -323,6 +326,7 @@ export default function WorkspacePane(): React.JSX.Element {
                   active={tab.key === effectiveTab}
                 />
               ))}
+              </Suspense>
             </div>
           )}
 
@@ -338,7 +342,6 @@ export default function WorkspacePane(): React.JSX.Element {
             </div>
           )}
         </div>
-      </Suspense>
 
       {pendingClose && (
         <ConfirmDialog

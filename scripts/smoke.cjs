@@ -1,6 +1,6 @@
 // Isolated integration checks against the compiled Electron app.
 // Run after npm run build: node_modules/electron/dist/electron.exe scripts/smoke.cjs
-const { app, BrowserWindow, ipcMain, Notification } = require('electron')
+const { app, BrowserWindow, ipcMain, nativeImage, Notification } = require('electron')
 const { mkdtemp, mkdir, writeFile, appendFile, realpath } = require('node:fs/promises')
 const { tmpdir } = require('node:os')
 const { join } = require('node:path')
@@ -27,6 +27,14 @@ Notification.prototype.show = function () {}
 const overlayCalls = []
 BrowserWindow.prototype.setOverlayIcon = function (_image, description) {
   overlayCalls.push(description)
+}
+let windowIcon
+const setIcon = BrowserWindow.prototype.setIcon
+if (process.platform === 'win32') {
+  BrowserWindow.prototype.setIcon = function (image) {
+    windowIcon = image
+    return setIcon.call(this, image)
+  }
 }
 app.on('web-contents-created', (_event, contents) => {
   contents.on('console-message', (details) => {
@@ -57,8 +65,15 @@ app.on('web-contents-created', (_event, contents) => {
     process.env.CLAUDE_SESSION_MANAGER_USER_DATA = configDir
     require('../out/main/index.js')
     await app.whenReady()
+    assert.equal(app.getName(), 'Claude Session Desk')
+    checks.push('The application name is Claude Session Desk')
     await until(() => BrowserWindow.getAllWindows().length === 1, 'window creation')
     const win = BrowserWindow.getAllWindows()[0]
+    if (process.platform === 'win32') {
+      const expectedIcon = nativeImage.createFromPath(join(__dirname, '../build/icon.png'))
+      assert(windowIcon && !windowIcon.isEmpty() && windowIcon.toPNG().equals(expectedIcon.toPNG()))
+      checks.push('The Windows window explicitly receives the app icon before being shown')
+    }
     assert.equal(win.listenerCount('minimize'), 0, 'Minimizing must use native taskbar behavior instead of a hide-to-tray handler')
     checks.push('Minimizing uses normal taskbar behavior instead of hiding the window to the tray')
     const js = (source) => win.webContents.executeJavaScript(source, true)
@@ -81,6 +96,7 @@ app.on('web-contents-created', (_event, contents) => {
     await until(() => js(`Boolean(document.querySelector('.workspace-empty'))`), 'initial render')
     assert(await js(`Boolean(document.querySelector('.workspace-empty button'))`))
     assert(await js(`document.querySelector('.notice').textContent.includes('尚未找到')`))
+    const initialWorkspaceTop = await js(`document.querySelector('.workspace-pane').getBoundingClientRect().top`)
     const resources = await js(`performance.getEntriesByType('resource').map(item => item.name)`)
     assert(!resources.some((name) => /(?:TerminalTab|SessionDetail)-.*\.js/.test(name)))
     checks.push('Missing data root still permits new conversations; terminal/Markdown chunks are deferred')
@@ -108,6 +124,9 @@ app.on('web-contents-created', (_event, contents) => {
     win.webContents.send('data:changed')
     await showActivity()
     await until(() => js(`document.querySelectorAll('.session-row').length === 1`), 'session appears')
+    assert.equal(await js(`document.querySelector('.workspace-pane').getBoundingClientRect().top`), initialWorkspaceTop,
+      'The first transcript scan must not change the vertical position of the workspace')
+    checks.push('The first transcript scan does not shift the workspace')
     assert(await js(`(() => { const activity = document.querySelector('.rail-nav button');
       const list = activity.nextElementSibling;
       return list.matches('.embedded-sessions') && !list.querySelector('.embedded-session-head') && list.nextElementSibling.textContent.includes('收藏'); })()`), 'Activity list must be immediately below its toggle without a recent heading')
@@ -192,6 +211,8 @@ app.on('web-contents-created', (_event, contents) => {
     await delay(60)
     assert(await js(`!document.querySelector('.search-status') && document.querySelector('.search-box input').value === ''`))
     checks.push('Clearing a pending search ignores its late reply')
+
+    await require('./smoke-terminal-render.cjs')({ win, dir, js, until, checks, showActivity })
 
     // Use IPC fakes for terminal lifecycle checks; no real Claude process is launched.
     let starts = 0
@@ -523,6 +544,20 @@ app.on('web-contents-created', (_event, contents) => {
     assert(!forkRequests[0].sessionId)
     checks.push('Forking a conversation preallocates a new id and resumes the source with --fork-session')
 
+    await js('Promise.all([window.api.updateSettings({localApiEnabled: true}), window.api.updateSettings({localApiEnabled: true})])')
+    const apiInfo = await js('window.api.getLocalApiInfo()')
+    assert(apiInfo.enabled && apiInfo.url?.startsWith('http://127.0.0.1:') && apiInfo.token)
+    const response = await fetch(`${apiInfo.url}/v1/health`, {
+      headers: { Authorization: `Bearer ${apiInfo.token}` },
+      signal: AbortSignal.timeout(2000)
+    })
+    assert.deepEqual(await response.json(), { ok: true })
+    await js('window.api.updateSettings({localApiEnabled: false})')
+    assert.deepEqual(await js('window.api.getLocalApiInfo()'), { enabled: false, url: null, token: null })
+    await assert.rejects(fetch(`${apiInfo.url}/v1/health`, { signal: AbortSignal.timeout(2000) }),
+      (error) => error.cause?.code === 'ECONNREFUSED')
+    checks.push('Repeated local API enables start the listener and disabling it closes the port')
+
     const scheduledName = 'smoke-scheduled-task'
     const scheduled = await js(`window.api.createScheduledTask(${JSON.stringify({
       name: scheduledName,
@@ -579,6 +614,27 @@ app.on('web-contents-created', (_event, contents) => {
     const claudeMdTemplates = await js(`window.api.listClaudeMdTemplates()`)
     assert(claudeMdTemplates.some((template) => template.id === 'builtin:project:04-code-review'))
     checks.push('CLAUDE.md project editing and built-in templates work end to end')
+
+    ipcMain.removeHandler('inbox:list')
+    ipcMain.handle('inbox:list', () => [{
+      kind: 'task', id: 'inbox-fixture', runId: 'inbox-fixture', taskId: scheduled.id,
+      taskName: '后台任务结果', projectPath: dir, status: 'success', endedAt: Date.now(),
+      outputTail: 'fixture output', sessionId
+    }])
+    win.webContents.send('approvals:changed', [])
+    await until(() => js("Boolean(document.querySelector('.approval-chip'))"), 'inbox trigger')
+    const openInbox = () => js("document.querySelector('.approval-chip').focus(); document.querySelector('.approval-chip').click()")
+    await openInbox()
+    await until(() => js("document.querySelector('.approval-panel')?.contains(document.activeElement)"), 'inbox receives focus')
+    await js("document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))")
+    await until(() => js("!document.querySelector('.approval-panel') && document.activeElement.matches('.approval-chip')"), 'inbox Escape and focus restore')
+    await openInbox()
+    await until(() => js("Boolean(document.querySelector('.inbox-task .approval-focus'))"), 'background session action')
+    await js("document.querySelector('.inbox-task .approval-focus').click()")
+    await until(() => js(`!document.querySelector('.approval-panel') &&
+      Boolean(document.querySelector('.workspace-record-tab[aria-selected="true"]')) &&
+      Boolean(document.querySelector('[data-uuid="first"]'))`), 'background transcript opens without a terminal')
+    checks.push('The inbox supports Escape and opens a background task transcript without a terminal tab')
 
     if (process.env.CSM_NAV_SCREENSHOT) {
       win.setSize(1280, 800)

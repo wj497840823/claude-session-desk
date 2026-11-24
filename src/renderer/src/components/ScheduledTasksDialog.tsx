@@ -1,10 +1,14 @@
 import { useEffect, useState } from 'react'
 import {
+  BarChart3,
   Clock,
   FileText,
+  Pause,
   Pencil,
   Play,
   Plus,
+  Power,
+  RotateCcw,
   Square,
   Trash2,
   X
@@ -14,9 +18,12 @@ import type {
   ScheduledTaskInput,
   ScheduledTaskRun,
   ScheduleSpec,
-  TerminalPermissionMode
+  TerminalPermissionMode,
+  UsageSummary,
+  UsageTotals
 } from '@shared/types'
 import { WEEKDAY_LABELS, describeSchedule } from '@shared/schedule'
+import { formatCompactTokens, formatUsageCost } from '@shared/usage'
 import { useStore } from '../store'
 import { useDialog } from '../lib/useDialog'
 import ConfirmDialog from './ConfirmDialog'
@@ -30,7 +37,7 @@ const PERMISSION_OPTIONS: Array<{ value: TerminalPermissionMode; label: string }
   { value: 'follow', label: '跟随 Claude 设置' }
 ]
 
-type Mode = 'list' | 'edit' | 'logs'
+type Mode = 'list' | 'edit' | 'logs' | 'usage'
 
 interface FormState {
   name: string
@@ -49,6 +56,9 @@ interface FormState {
   time: string
   weekdays: number[]
   intervalMinutes: string
+  triggerKind: 'none' | 'file' | 'git' | 'event'
+  triggerPath: string
+  triggerEventType: string
 }
 
 function pad(value: number): string {
@@ -88,7 +98,10 @@ function defaultForm(): FormState {
     onceAt: toLocalInput(Date.now() + 60 * 60_000),
     time: '09:00',
     weekdays: [1],
-    intervalMinutes: '60'
+    intervalMinutes: '60',
+    triggerKind: 'none',
+    triggerPath: '',
+    triggerEventType: ''
   }
 }
 
@@ -109,7 +122,10 @@ function formFromTask(task: ScheduledTask): FormState {
     onceAt: task.schedule.kind === 'once' ? toLocalInput(task.schedule.at) : toLocalInput(Date.now() + 60 * 60_000),
     time: task.schedule.kind === 'daily' || task.schedule.kind === 'weekly' ? task.schedule.time : '09:00',
     weekdays: task.schedule.kind === 'weekly' ? task.schedule.weekdays : [1],
-    intervalMinutes: task.schedule.kind === 'interval' ? String(task.schedule.minutes) : '60'
+    intervalMinutes: task.schedule.kind === 'interval' ? String(task.schedule.minutes) : '60',
+    triggerKind: task.trigger?.kind ?? 'none',
+    triggerPath: task.trigger?.kind === 'file' ? task.trigger.path : '',
+    triggerEventType: task.trigger?.kind === 'event' ? task.trigger.type : ''
   }
 }
 
@@ -135,7 +151,27 @@ function statusLabel(run: ScheduledTaskRun | undefined): string {
   if (run.status === 'success') return '成功'
   if (run.status === 'timeout') return '超时'
   if (run.status === 'cancelled') return '已取消'
-  return '失败'
+  return run.retryAt ? '失败（待重试）' : '失败'
+}
+
+function UsageCard({ title, totals }: { title: string; totals?: UsageTotals }): React.JSX.Element {
+  const totalTokens = (totals?.inputTokens ?? 0) + (totals?.outputTokens ?? 0)
+  const cost = formatUsageCost(totals?.costUSD ?? null)
+  return (
+    <div className="usage-card">
+      <span className="usage-card-title">{title}</span>
+      <strong>{totals?.runs ?? 0} 次运行</strong>
+      <span>{formatCompactTokens(totalTokens)} tokens</span>
+      <span>{cost ?? '—'}</span>
+      <small>
+        缓存读 {formatCompactTokens(totals?.cacheReadTokens ?? 0)} · 写{' '}
+        {formatCompactTokens(totals?.cacheWriteTokens ?? 0)}
+      </small>
+      {Boolean(totals?.missingUsageRuns) && (
+        <small className="usage-missing">{totals?.missingUsageRuns} 次缺少用量</small>
+      )}
+    </div>
+  )
 }
 
 export default function ScheduledTasksDialog(): React.JSX.Element | null {
@@ -157,6 +193,8 @@ export default function ScheduledTasksDialog(): React.JSX.Element | null {
   const [runs, setRuns] = useState<ScheduledTaskRun[]>([])
   const [logContent, setLogContent] = useState('')
   const [logLoading, setLogLoading] = useState(false)
+  const [usage, setUsage] = useState<UsageSummary | null>(null)
+  const [usageLoading, setUsageLoading] = useState(false)
 
   const load = async (): Promise<void> => {
     setLoading(true)
@@ -166,6 +204,17 @@ export default function ScheduledTasksDialog(): React.JSX.Element | null {
       showToast({ kind: 'error', message: `读取定时任务失败：${String(cause)}` })
     } finally {
       setLoading(false)
+    }
+  }
+
+  const loadUsage = async (): Promise<void> => {
+    setUsageLoading(true)
+    try {
+      setUsage(await window.api.getUsageSummary())
+    } catch (cause) {
+      showToast({ kind: 'error', message: `读取用量失败：${String(cause)}` })
+    } finally {
+      setUsageLoading(false)
     }
   }
 
@@ -218,12 +267,20 @@ export default function ScheduledTasksDialog(): React.JSX.Element | null {
     setError('')
     try {
       const schedule = scheduleFromForm(form)
+      const trigger = form.triggerKind === 'none'
+        ? undefined
+        : form.triggerKind === 'git'
+          ? { kind: 'git' as const }
+          : form.triggerKind === 'event'
+            ? { kind: 'event' as const, type: form.triggerEventType.trim() }
+            : { kind: 'file' as const, path: form.triggerPath.trim() }
       const input: ScheduledTaskInput = {
         name: form.name.trim(),
         enabled: form.enabled,
         projectPath: form.projectPath.trim(),
         type: form.type,
         schedule,
+        trigger,
         ...(form.type === 'claude'
           ? {
               prompt: form.prompt,
@@ -272,6 +329,45 @@ export default function ScheduledTasksDialog(): React.JSX.Element | null {
       const result = await window.api.cancelScheduledTask(task.id)
       if (!result.ok) showToast({ kind: 'error', message: result.message ?? '无法停止任务' })
       else showToast({ kind: 'success', message: `正在停止：${task.name}` })
+      await load()
+    } catch (cause) {
+      showToast({ kind: 'error', message: String(cause) })
+    }
+  }
+
+  const pauseTask = async (task: ScheduledTask): Promise<void> => {
+    try {
+      await window.api.pauseScheduledTask(task.id, Date.now() + 60 * 60_000, '手动暂停 1 小时')
+      await load()
+      showToast({ kind: 'success', message: `已暂停 1 小时：${task.name}` })
+    } catch (cause) {
+      showToast({ kind: 'error', message: String(cause) })
+    }
+  }
+
+  const resumeTask = async (task: ScheduledTask): Promise<void> => {
+    try {
+      const result = await window.api.resumeScheduledTask(task.id)
+      await load()
+      showToast({
+        kind: 'success',
+        message: result.skipped > 0
+          ? `已恢复；暂停期间有 ${result.skipped} 次触发未执行，可点击补跑`
+          : `已恢复：${task.name}`
+      })
+    } catch (cause) {
+      showToast({ kind: 'error', message: String(cause) })
+    }
+  }
+
+  const replayTask = async (task: ScheduledTask): Promise<void> => {
+    try {
+      const result = await window.api.replayScheduledTask(task.id)
+      if (!result.ok) {
+        showToast({ kind: 'error', message: result.message ?? '无法补跑' })
+      } else {
+        showToast({ kind: 'success', message: `已补跑：${task.name}` })
+      }
       await load()
     } catch (cause) {
       showToast({ kind: 'error', message: String(cause) })
@@ -335,13 +431,21 @@ export default function ScheduledTasksDialog(): React.JSX.Element | null {
         >
           <div className="scheduled-head">
             <div>
-              <h2>{mode === 'list' ? '定时任务' : mode === 'edit' ? (editing ? '编辑定时任务' : '新建定时任务') : '运行日志'}</h2>
+              <h2>{mode === 'list'
+                ? '定时任务'
+                : mode === 'edit'
+                  ? (editing ? '编辑定时任务' : '新建定时任务')
+                  : mode === 'logs'
+                    ? '运行日志'
+                    : '用量统计'}</h2>
               <p className="scheduled-sub">
                 {mode === 'list'
                   ? '应用在托盘或后台运行时执行'
                   : mode === 'edit'
                     ? 'Claude 任务默认使用只读/计划模式'
-                    : logsTask?.name ?? ''}
+                    : mode === 'logs'
+                      ? logsTask?.name ?? ''
+                      : '定时任务近 7 天的 token 与估算费用'}
               </p>
             </div>
             <button className="icon-button" title="关闭" onClick={() => setOpen(false)}><X size={16} /></button>
@@ -351,6 +455,10 @@ export default function ScheduledTasksDialog(): React.JSX.Element | null {
             <>
               <div className="scheduled-toolbar">
                 <button className="btn primary" onClick={startCreate}><Plus size={14} />新建任务</button>
+                <button className="btn" onClick={() => { setMode('usage'); void loadUsage() }}>
+                  <BarChart3 size={14} />
+                  用量
+                </button>
                 <span className="muted">{loading ? '读取中…' : `${tasks.length} 个任务`}</span>
               </div>
               <div className="scheduled-list">
@@ -392,6 +500,37 @@ export default function ScheduledTasksDialog(): React.JSX.Element | null {
                         <span>{projectName(task.projectPath)}</span>
                         <span>·</span>
                         <span>下次：{formatTime(task.nextRun)}</span>
+                        {task.trigger && (
+                          <>
+                            <span>·</span>
+                            <span title={task.trigger.kind === 'file'
+                                ? task.trigger.path
+                                : task.trigger.kind === 'event'
+                                  ? task.trigger.type
+                                  : task.projectPath}>
+                              触发：{task.trigger.kind === 'git'
+                                ? 'Git 新提交'
+                                : task.trigger.kind === 'event'
+                                  ? `事件 ${task.trigger.type}`
+                                  : `文件 ${projectName(task.trigger.path)}`}
+                            </span>
+                          </>
+                        )}
+                        {task.pausedUntil && task.pausedUntil > Date.now() && (
+                          <span className="scheduled-retry">
+                            · 已暂停至 {formatTime(task.pausedUntil)}
+                          </span>
+                        )}
+                        {Boolean(task.skippedTriggerCount) && (
+                          <span className="scheduled-retry">
+                            · 跳过 {task.skippedTriggerCount} 次触发
+                          </span>
+                        )}
+                        {task.pendingAsk && (
+                          <span className="scheduled-retry">
+                            · 等待回答：{task.pendingAsk.title}
+                          </span>
+                        )}
                       </div>
                       <div className="scheduled-meta">
                         <span className={`scheduled-status ${task.lastRun?.status ?? 'idle'}`}>
@@ -400,15 +539,37 @@ export default function ScheduledTasksDialog(): React.JSX.Element | null {
                         {task.lastRun?.endedAt && (
                           <span>· {formatTime(task.lastRun.endedAt)}</span>
                         )}
+                        {task.retry && (
+                          <span className="scheduled-retry" title={task.retry.reason}>
+                            · {task.retry.limit
+                              ? `额度恢复后继续：${formatTime(task.retry.at)}`
+                              : `第 ${task.retry.attempt} 次重试：${formatTime(task.retry.at)}`}
+                            {task.retry.sessionId ? '（续接原会话）' : ''}
+                          </span>
+                        )}
                       </div>
                     </div>
                     <div className="scheduled-actions">
+                      {task.pausedUntil && task.pausedUntil > Date.now() ? (
+                        <button className="icon-button" title="恢复定时运行" aria-label="恢复定时运行" onClick={() => void resumeTask(task)}>
+                          <Power size={14} />
+                        </button>
+                      ) : (
+                        <button className="icon-button" title="暂停定时运行 1 小时（仍可立即运行）" aria-label="暂停定时运行 1 小时" onClick={() => void pauseTask(task)}>
+                          <Pause size={14} />
+                        </button>
+                      )}
+                      {Boolean(task.skippedTriggerCount) && (
+                        <button className="icon-button" title={`补跑暂停期间跳过的 ${task.skippedTriggerCount} 次触发`} aria-label="补跑跳过的触发" onClick={() => void replayTask(task)}>
+                          <RotateCcw size={14} />
+                        </button>
+                      )}
                       {task.running ? (
                         <button className="icon-button danger" title="停止运行" aria-label="停止运行" onClick={() => void cancelRun(task)}>
                           <Square size={13} />
                         </button>
                       ) : (
-                        <button className="icon-button" title="立即运行一次（不影响定时）" aria-label="立即运行一次" onClick={() => void runNow(task)}>
+                        <button className="icon-button" disabled={Boolean(task.pendingAsk)} title={task.pendingAsk ? '请先在待处理中回答' : '立即运行一次（不影响定时）'} aria-label="立即运行一次" onClick={() => void runNow(task)}>
                           <Play size={14} />
                         </button>
                       )}
@@ -610,6 +771,61 @@ export default function ScheduledTasksDialog(): React.JSX.Element | null {
                 </div>
               )}
 
+              <div className="scheduled-form-grid">
+                <label className="settings-field">
+                  <span>附加触发</span>
+                  <select
+                    value={form.triggerKind}
+                    onChange={(event) => setForm({
+                      ...form,
+                      triggerKind: event.target.value as FormState['triggerKind']
+                    })}
+                  >
+                    <option value="none">不启用（仅按时间）</option>
+                    <option value="file">文件或文件夹变更</option>
+                    <option value="git">Git 新提交</option>
+                    <option value="event">外部事件（本地 HTTP）</option>
+                  </select>
+                </label>
+                {form.triggerKind === 'file' && (
+                  <label className="settings-field">
+                    <span>监视路径</span>
+                    <div className="scheduled-path-row">
+                      <input
+                        value={form.triggerPath}
+                        onChange={(event) => setForm({ ...form, triggerPath: event.target.value })}
+                        placeholder="文件或文件夹路径"
+                      />
+                      <button className="btn" onClick={() => void window.api.pickFolder().then((result) => {
+                        if (result.ok && result.path) {
+                          setForm((current) => ({ ...current, triggerPath: result.path! }))
+                        }
+                      })}>选择文件夹</button>
+                    </div>
+                  </label>
+                )}
+                {form.triggerKind === 'event' && (
+                  <label className="settings-field">
+                    <span>事件类型</span>
+                    <input
+                      value={form.triggerEventType}
+                      onChange={(event) => setForm({ ...form, triggerEventType: event.target.value })}
+                      placeholder="例如 github.issues.opened 或 github.*"
+                    />
+                  </label>
+                )}
+              </div>
+              {form.triggerKind !== 'none' && (
+                <p className="dialog-hint">
+                  {form.triggerKind === 'git'
+                    ? '监视项目目录的 Git HEAD，每次新提交触发一次。'
+                    : form.triggerKind === 'event'
+                      ? '通过本地 HTTP 的 POST /v1/events 提交事件；支持精确类型和 prefix.*。事件正文写入本地资料文件，不拼进提示词。'
+                      : '监视该文件或文件夹的变更，连续事件会合并。'}
+                  触发运行沿用当前任务配置，不改变定时计划；同一任务 5 分钟内最多触发一次。暂停期间被跳过的触发可在任务列表补跑。
+                </p>
+              )}
+
               <label className="settings-check">
                 <input type="checkbox" checked={form.enabled} onChange={(event) => setForm({ ...form, enabled: event.target.checked })} />
                 <span><strong>启用任务</strong><small>保存后按调度自动运行。</small></span>
@@ -630,12 +846,52 @@ export default function ScheduledTasksDialog(): React.JSX.Element | null {
                   <button key={run.id} className="scheduled-log-run" onClick={() => logsTask && void showRun(logsTask, run)}>
                     <span className={`scheduled-status ${run.status}`}>{statusLabel(run)}</span>
                     <span>{formatTime(run.startedAt)}</span>
+                    {run.attempt && run.attempt > 1 && <span>第 {run.attempt} 次</span>}
                     <span>{Math.round((run.endedAt - run.startedAt) / 1000)}s</span>
                   </button>
                 ))}
               </div>
               <pre className="scheduled-log-content">{logLoading ? '读取中…' : logContent || '暂无日志'}</pre>
               <div className="dialog-actions">
+                <button className="btn" onClick={() => setMode('list')}>返回</button>
+              </div>
+            </div>
+          )}
+
+          {mode === 'usage' && (
+            <div className="scheduled-logs usage-view">
+              <div className="usage-cards">
+                <UsageCard title="今天" totals={usage?.today} />
+                <UsageCard title="近 7 天" totals={usage?.week} />
+              </div>
+              {usageLoading && <div className="list-empty">读取中…</div>}
+              <div className="usage-list">
+                {!usageLoading && (usage?.tasks.length ?? 0) === 0 && (
+                  <div className="list-empty">近 7 天还没有定时任务用量</div>
+                )}
+                {(usage?.tasks ?? []).map((task) => (
+                  <div className="usage-row" key={task.taskId}>
+                    <div className="usage-row-title">
+                      <strong>{task.taskName}</strong>
+                      <span>{projectName(task.projectPath)}</span>
+                    </div>
+                    <div className="usage-row-meta">
+                      <span>{task.totals.runs} 次</span>
+                      <span>
+                        {formatCompactTokens(task.totals.inputTokens + task.totals.outputTokens)} tokens
+                      </span>
+                      <span>{formatUsageCost(task.totals.costUSD) ?? '未定价'}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <p className="dialog-hint">
+                统计来自定时任务的 stream-json 结果（每个任务保留最近 20 次运行），命令任务不计入。今天缺少用量的运行{' '}
+                {usage?.today.missingUsageRuns ?? 0} 次，近 7 天{' '}
+                {usage?.week.missingUsageRuns ?? 0} 次。
+              </p>
+              <div className="dialog-actions">
+                <button className="btn" onClick={() => void loadUsage()}>刷新</button>
                 <button className="btn" onClick={() => setMode('list')}>返回</button>
               </div>
             </div>

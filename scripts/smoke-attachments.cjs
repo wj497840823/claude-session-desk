@@ -9,10 +9,13 @@ module.exports = async ({ win, dir, projectDir, sessionId, configDir, js, until,
     open: shell.openPath, reveal: shell.showItemInFolder, web: shell.openExternal,
     sources: desktopCapturer.getSources }
   const opened = [], revealed = [], written = []
+  const resizes = []
   const ptyId = 'attachment-test-pty'
   try {
     ipcMain.removeHandler('terminal:start')
     ipcMain.handle('terminal:start', () => ({ ok: true, ptyId }))
+    ipcMain.removeHandler('terminal:resize')
+    ipcMain.handle('terminal:resize', (_event, id, cols, rows) => { resizes.push({ id, cols, rows }) })
     ipcMain.removeHandler('terminal:write')
     ipcMain.handle('terminal:write', (_event, id, data) => { written.push({ id, data }) })
     shell.openPath = async (path) => { opened.push(path); return '' }
@@ -20,6 +23,24 @@ module.exports = async ({ win, dir, projectDir, sessionId, configDir, js, until,
     shell.openExternal = async () => undefined
     await js(`document.querySelector('button[title="重新开始"]').click()`)
     await until(() => js(`document.querySelector('.terminal-tab-view.active .terminal-status')?.textContent.includes('运行中')`), 'attachment terminal')
+
+    for (const title of ['Claude 功能：回退 / Skill / MCP', '会话操作']) {
+      const trigger = `.terminal-tab-view.active button[title="${title}"]`
+      await js(`document.querySelector(${JSON.stringify(trigger)}).click()`)
+      await until(() => js(`(() => {
+        const row = document.querySelector(${JSON.stringify(trigger)}).parentElement.querySelector('.menu button')
+        if (!row) return false
+        const { x, y, width, height } = row.getBoundingClientRect()
+        return row.contains(document.elementFromPoint(x + width / 2, y + height / 2))
+      })()`), `clickable terminal menu: ${title}`)
+      await js(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`)
+    }
+    checks.push('Both terminal menus are visible and clickable below the narrow header')
+
+    await delay(120)
+    assert.equal(resizes.length, 0, 'The terminal starts at its fitted size without an immediate resize')
+    const modePosition = () => js(`document.querySelector('.terminal-tab-view.active .terminal-mode').getBoundingClientRect().left`)
+    const initialPosition = await modePosition()
 
     win.webContents.send('terminal:activity', { ptyId, sessionId, activity: 'approval' })
     await until(() => js(`document.querySelector('.terminal-tab-view.active .terminal-status')?.textContent.includes('等待确认')`), 'approval activity status')
@@ -35,7 +56,21 @@ module.exports = async ({ win, dir, projectDir, sessionId, configDir, js, until,
     await until(() => js(`document.querySelector('.terminal-tab-view.active .terminal-status')?.textContent.includes('工作中')`), 'working activity status')
     assert(await js(`document.querySelector('.terminal-tab.active .terminal-tab-letter.working')?.textContent.trim() === 'W'`))
     assert(await js(`!document.querySelector('.terminal-tab.active .terminal-tab-attention')`))
+    assert.equal(await modePosition(), initialPosition, 'Changing the activity label must not shift the header')
     checks.push('Terminal activity events drive the tab status label and colour')
+
+    const setBodyMargin = (margin) => js(`document.querySelector('.terminal-tab-view.active .terminal-body').style.marginBottom = '${margin}'`)
+    await setBodyMargin('48px')
+    await delay(35)
+    await setBodyMargin('')
+    await delay(160)
+    assert.equal(resizes.length, 0, 'Transient layout changes must not resize the PTY')
+    await setBodyMargin('48px')
+    await until(() => resizes.length === 1, 'stable terminal resize')
+    await setBodyMargin('')
+    await until(() => resizes.length === 2, 'restore stable terminal size')
+    assert(resizes[0].rows < resizes[1].rows)
+    checks.push('Terminal starts at its measured size and resizes only after layout settles')
 
     win.webContents.send('terminal:activity', { ptyId, sessionId: 'attention-test-session', activity: 'approval' })
     await until(() => overlayCalls.some((description) => description.includes('个对话待查看')), 'taskbar attention badge')

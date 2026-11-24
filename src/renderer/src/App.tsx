@@ -8,13 +8,13 @@ import SettingsDialog from './components/SettingsDialog'
 import ScheduledTasksDialog from './components/ScheduledTasksDialog'
 import ClaudeMdEditorDialog from './components/ClaudeMdEditorDialog'
 import GitPanel from './components/GitPanel'
+import AttentionInbox from './components/AttentionInbox'
 import TemplateManagerDialog from './components/TemplateManagerDialog'
 import TerminalStartDialog from './components/TerminalStartDialog'
 import Toast from './components/Toast'
 import TopBar from './components/TopBar'
 import WorkspacePane from './components/WorkspacePane'
 import { loadSnapshot, refreshSnapshot } from './lib/actions'
-import { activeProjectKeys, refreshGitStatuses } from './lib/git'
 import { saveOpenTabs } from './lib/openTabs'
 import { useStore } from './store'
 import { fitPanelWidths } from './lib/panelLayout'
@@ -51,6 +51,7 @@ export default function App(): React.JSX.Element {
   const setSessionListWidth = useStore((state) => state.setSessionListWidth)
   const terminals = useStore((state) => state.terminals)
   const activeTab = useStore((state) => state.activeTab)
+  const sessionRefreshInterest = activeTab === 'record'
   const attention = useStore((state) => state.attention)
   const archived = useStore((state) => state.archived)
   const gitPanelProject = useStore((state) => state.gitPanelProject)
@@ -108,11 +109,35 @@ export default function App(): React.JSX.Element {
   }, [])
 
   useEffect(() => {
+    void window.api.setSessionRefreshInterest(sessionRefreshInterest).catch(() => undefined)
+  }, [sessionRefreshInterest])
+
+  useEffect(() => {
+    const loadInbox = (): void => {
+      void window.api.listInbox()
+        .then((items) => useStore.getState().setInbox(items))
+        .catch(() => undefined)
+    }
+    loadInbox()
+    const offApprovals = window.api.onApprovalsChanged(loadInbox)
+    const offSchedules = window.api.onSchedulesChanged(loadInbox)
+    const offOpen = window.api.onApprovalsOpen(() => {
+      useStore.getState().setApprovalPanelOpen(true)
+      loadInbox()
+    })
+    return () => {
+      offApprovals()
+      offSchedules()
+      offOpen()
+    }
+  }, [])
+
+  useEffect(() => {
     const offActivity = window.api.onTerminalActivity((event) => {
       if (!event.sessionId) return
       const state = useStore.getState()
       state.setTerminalActivity(event.sessionId, event.activity)
-      if (event.activity === 'working') {
+      if (event.activity === 'working' || event.activity === 'background') {
         state.setAttention(event.sessionId, null)
       } else {
         const viewing = document.hasFocus() &&
@@ -175,21 +200,6 @@ export default function App(): React.JSX.Element {
       approval: values.filter((kind) => kind === 'approval').length
     }).catch(() => undefined)
   }, [attention])
-
-  useEffect(() => {
-    const refresh = (): void => {
-      if (document.visibilityState !== 'visible') return
-      const state = useStore.getState()
-      void refreshGitStatuses(activeProjectKeys(state.snapshot, state.archived))
-    }
-    refresh()
-    const timer = window.setInterval(refresh, 30000)
-    window.addEventListener('focus', refresh)
-    return () => {
-      window.clearInterval(timer)
-      window.removeEventListener('focus', refresh)
-    }
-  }, [snapshot?.scannedAt, archived])
 
   useEffect(() => {
     if (
@@ -273,16 +283,6 @@ export default function App(): React.JSX.Element {
   return (
     <div className="app-shell">
       <TopBar />
-      {snapshot && !snapshot.dataRootExists && (
-        <div className="notice">
-          尚未找到会话目录：{snapshot.dataRoot}。你可以选择项目文件夹新建对话。
-        </div>
-      )}
-      {snapshot && snapshot.skippedFiles > 0 && (
-        <div className="notice">
-          有 {snapshot.skippedFiles} 个会话文件无法读取，已跳过。
-        </div>
-      )}
       <div
         className="app-body"
         style={
@@ -336,6 +336,7 @@ export default function App(): React.JSX.Element {
       <TemplateManagerDialog />
       <ScheduledTasksDialog />
       <GitPanel />
+      <AttentionInbox />
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
       <Toast />
     </div>

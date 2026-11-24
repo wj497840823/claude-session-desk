@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import type { SessionEvent } from '../src/shared/types'
+import type { SessionEvent, SessionUsage } from '../src/shared/types'
 import {
   estimateCost,
   formatCompactTokens,
   formatUsageCost,
+  sameUsage,
   summarizeUsage
 } from '../src/shared/usage'
 
@@ -90,5 +91,32 @@ describe('usage formatting', () => {
     expect(formatUsageCost(null)).toBeNull()
     expect(formatUsageCost(0.126)).toBe('$0.13')
     expect(formatUsageCost(0.004)).toBe('<$0.01')
+  })
+})
+
+describe('sameUsage', () => {
+  const snapshot = (overrides: Partial<SessionUsage> = {}): SessionUsage => ({
+    inputTokens: 100,
+    outputTokens: 20,
+    cacheReadTokens: 1000,
+    cacheWriteTokens: 200,
+    costUSD: 0.12,
+    contextTokens: 1320,
+    contextLimit: 200_000,
+    contextPercent: 0.66,
+    model: 'claude-sonnet-4',
+    ...overrides
+  })
+
+  it('treats identical values from different objects as unchanged', () => {
+    expect(sameUsage(snapshot(), snapshot())).toBe(true)
+    expect(sameUsage(null, null)).toBe(true)
+  })
+
+  it('detects token, model and null-state changes', () => {
+    expect(sameUsage(snapshot(), snapshot({ inputTokens: 101 }))).toBe(false)
+    expect(sameUsage(snapshot(), snapshot({ model: 'claude-opus-4' }))).toBe(false)
+    expect(sameUsage(snapshot(), null)).toBe(false)
+    expect(sameUsage(null, snapshot())).toBe(false)
   })
 })

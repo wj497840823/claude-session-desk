@@ -3,8 +3,10 @@ import { IPC } from '@shared/ipc'
 import type {
   AppSettings,
   AttentionSummary,
+  ClaudeMdPlacement,
   ClaudeMdScope,
   GitDiffGroup,
+  LocalApiInfo,
   ScheduledTaskInput
 } from '@shared/types'
 import type { AppServices } from './services'
@@ -13,6 +15,8 @@ import type { FileService } from './files'
 import type { ScheduledTaskService } from './scheduledTasks'
 import type { ClaudeMdService } from './claudeMd'
 import type { GitService } from './git'
+import type { ApprovalBroker } from './approvalBroker'
+import { buildInbox } from './inbox'
 import { captureScreenshot } from './screenshot'
 import type { FileContext } from '@shared/types'
 
@@ -26,6 +30,12 @@ function requireString(value: unknown, label: string): string {
 function requireClaudeMdScope(value: unknown): ClaudeMdScope {
   if (value === 'global' || value === 'project') return value
   throw new Error('非法 CLAUDE.md 作用域')
+}
+
+function optionalClaudeMdPlacement(value: unknown): ClaudeMdPlacement | undefined {
+  if (value === undefined || value === null) return undefined
+  if (value === 'root' || value === 'claude-dir') return value
+  throw new Error('非法 CLAUDE.md 位置')
 }
 
 function optionalString(value: unknown, label: string): string | undefined {
@@ -43,12 +53,15 @@ export function registerIpc(
   services: AppServices,
   terminal: TerminalService,
   files: FileService,
-  onSettingsChanged?: (settings: AppSettings) => void,
+  onSettingsChanged?: (settings: AppSettings) => void | Promise<void>,
   onScreenshotCaptured?: () => void,
   onAttentionChanged?: (summary: AttentionSummary) => void,
   scheduledTasks?: ScheduledTaskService,
   claudeMd?: ClaudeMdService,
-  git?: GitService
+  git?: GitService,
+  approvals?: ApprovalBroker,
+  localApiInfo?: () => LocalApiInfo | Promise<LocalApiInfo>,
+  onSessionRefreshInterest?: (interest: boolean) => void
 ): void {
   const requireSchedules = (): ScheduledTaskService => {
     if (!scheduledTasks) throw new Error('定时任务服务未启动')
@@ -77,10 +90,66 @@ export function registerIpc(
     requireSchedules().runNow(requireString(id, 'taskId')))
   ipcMain.handle(IPC.schedulesCancel, (_event, id: unknown) =>
     requireSchedules().cancel(requireString(id, 'taskId')))
+  ipcMain.handle(IPC.schedulesPause, (_event, id: unknown, until: unknown, reason: unknown) => {
+    if (typeof until !== 'number' || !Number.isFinite(until)) throw new Error('非法暂停时间')
+    return requireSchedules().pause(
+      requireString(id, 'taskId'),
+      until,
+      optionalString(reason, 'reason')
+    )
+  })
+  ipcMain.handle(IPC.schedulesResume, (_event, id: unknown) =>
+    requireSchedules().resume(requireString(id, 'taskId')))
+  ipcMain.handle(IPC.schedulesReplay, (_event, id: unknown) =>
+    requireSchedules().replay(requireString(id, 'taskId')))
+  ipcMain.handle(IPC.schedulesAnswerAsk, (_event, id: unknown, answer: unknown) => {
+    if (!answer || typeof answer !== 'object' || Array.isArray(answer)) {
+      throw new Error('非法回答参数')
+    }
+    const value = answer as Record<string, unknown>
+    const choice = value.choice
+    const text = value.text
+    if (choice !== undefined && (typeof choice !== 'number' || !Number.isInteger(choice))) {
+      throw new Error('非法选项')
+    }
+    if (text !== undefined && typeof text !== 'string') throw new Error('非法回答')
+    return requireSchedules().answerAsk(requireString(id, 'taskId'), {
+      ...(choice !== undefined ? { choice: choice as number } : {}),
+      ...(text !== undefined ? { text } : {})
+    })
+  })
+  ipcMain.handle(IPC.schedulesIgnoreAsk, (_event, id: unknown) =>
+    requireSchedules().ignoreAsk(requireString(id, 'taskId')))
+  ipcMain.handle(IPC.usageSummary, () => requireSchedules().usageSummary())
+  ipcMain.handle(IPC.localApiInfo, () => localApiInfo?.() ?? {
+    enabled: false,
+    url: null,
+    token: null
+  })
+  ipcMain.handle(IPC.sessionRefreshInterest, (_event, interest: unknown) => {
+    if (typeof interest !== 'boolean') throw new Error('非法会话刷新参数')
+    onSessionRefreshInterest?.(interest)
+  })
   ipcMain.handle(IPC.schedulesRuns, (_event, id: unknown) =>
     requireSchedules().runs(requireString(id, 'taskId')))
   ipcMain.handle(IPC.schedulesLog, (_event, id: unknown, runId: unknown) =>
     requireSchedules().readLog(requireString(id, 'taskId'), requireString(runId, 'runId')))
+  ipcMain.handle(IPC.approvalsList, () => approvals?.list() ?? [])
+  ipcMain.handle(IPC.inboxList, () => {
+    if (approvals && scheduledTasks) return buildInbox(approvals, scheduledTasks)
+    return (approvals?.list() ?? []).map((request) => ({
+      kind: 'approval' as const,
+      ...request
+    }))
+  })
+  ipcMain.handle(IPC.inboxDismiss, (_event, id: unknown) =>
+    requireSchedules().dismissInbox(requireString(id, 'inboxId'))
+  )
+  ipcMain.handle(IPC.approvalsResolve, (_event, id: unknown, decision: unknown) => {
+    const approvalId = requireString(id, 'approvalId')
+    if (decision !== 'allow' && decision !== 'deny') throw new Error('非法审批决定')
+    return approvals?.resolve(approvalId, decision) ?? false
+  })
   ipcMain.handle(IPC.attentionUpdate, (_event, summary: unknown) => {
     if (!summary || typeof summary !== 'object') throw new Error('非法提示参数')
     const value = summary as Record<string, unknown>
@@ -200,8 +269,16 @@ export function registerIpc(
     return terminal.stop(requireString(ptyId, 'ptyId'))
   })
 
-  ipcMain.handle(IPC.claudeMdRead, (_event, scope: unknown, projectKey: unknown) =>
+  ipcMain.handle(IPC.claudeMdRead, (_event, scope: unknown, projectKey: unknown, placement: unknown) =>
     requireClaudeMd().read({
+      scope: requireClaudeMdScope(scope),
+      projectKey: optionalString(projectKey, 'projectKey'),
+      placement: optionalClaudeMdPlacement(placement)
+    })
+  )
+
+  ipcMain.handle(IPC.claudeMdLocations, (_event, scope: unknown, projectKey: unknown) =>
+    requireClaudeMd().locations({
       scope: requireClaudeMdScope(scope),
       projectKey: optionalString(projectKey, 'projectKey')
     })
@@ -215,6 +292,7 @@ export function registerIpc(
     return requireClaudeMd().write({
       scope: requireClaudeMdScope(value.scope),
       projectKey: optionalString(value.projectKey, 'projectKey'),
+      placement: optionalClaudeMdPlacement(value.placement),
       content: requireText(value.content, 'content')
     })
   })
@@ -343,7 +421,7 @@ export function registerIpc(
       throw new Error('非法设置参数')
     }
     const settings = await services.updateSettings(patch as Partial<AppSettings>)
-    onSettingsChanged?.(settings)
+    await onSettingsChanged?.(settings)
     return settings
   })
 }

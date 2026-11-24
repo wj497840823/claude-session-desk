@@ -3,6 +3,7 @@ import type {
   ClaudeMdScope,
   GitStatus,
   HistoryDetail,
+  InboxItem,
   SearchResponse,
   SessionDetail,
   Snapshot,
@@ -142,6 +143,8 @@ interface AppState {
   terminalStatus: Record<string, TerminalStatus>
   terminalActivity: Record<string, TerminalActivity>
   attention: Record<string, AttentionKind>
+  inbox: InboxItem[]
+  approvalPanelOpen: boolean
   terminalFocused: boolean
   leftRailCollapsed: boolean
   sessionListCollapsed: boolean
@@ -190,6 +193,8 @@ interface AppState {
   clearTerminalActivity: (sessionId: string) => void
   setAttention: (sessionId: string, kind: AttentionKind | null) => void
   clearAllAttention: () => void
+  setInbox: (inbox: InboxItem[]) => void
+  setApprovalPanelOpen: (open: boolean) => void
   setTerminalFocused: (focused: boolean) => void
   toggleLeftRail: () => void
   toggleSessionList: () => void
@@ -280,6 +285,8 @@ export const useStore = create<AppState>()((set) => ({
   terminalStatus: {},
   terminalActivity: {},
   attention: {},
+  inbox: [],
+  approvalPanelOpen: false,
   terminalFocused: false,
   leftRailCollapsed: storedBool('csm.leftRailCollapsed', false),
   // Startup always enters the activity view collapsed, including after an upgrade.
@@ -476,6 +483,8 @@ export const useStore = create<AppState>()((set) => ({
       return { attention }
     }),
   clearAllAttention: () => set({ attention: {} }),
+  setInbox: (inbox) => set({ inbox }),
+  setApprovalPanelOpen: (approvalPanelOpen) => set({ approvalPanelOpen }),
   setTerminalFocused: (terminalFocused) => set({ terminalFocused }),
   toggleLeftRail: () =>
     set((state) => {

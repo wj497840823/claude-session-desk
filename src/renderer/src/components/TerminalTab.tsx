@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
+import { flushSync } from 'react-dom'
 import {
   Download,
   FileText,
@@ -34,7 +35,7 @@ import { registerTerminalFileLinks } from '../lib/terminalFileLinks'
 import { addDraftFiles, emptyDraft, loadDraft, removeDraftFiles, saveDraft } from '../lib/attachmentDraft'
 import { checkFileReference } from '../lib/fileReferenceChecks'
 import { attachmentText } from '@shared/fileReferences'
-import { formatCompactTokens, formatUsageCost } from '@shared/usage'
+import { formatCompactTokens, formatUsageCost, sameUsage } from '@shared/usage'
 
 const LIGHT_THEME: ITheme = {
   background: '#ffffff',
@@ -61,7 +62,7 @@ const MODE_LABELS: Record<TerminalPermissionMode, string> = {
 
 type PendingAction = 'stop' | 'restart' | null
 
-export default function TerminalTab({
+function TerminalTab({
   session,
   active
 }: {
@@ -72,7 +73,6 @@ export default function TerminalTab({
   const clearTerminalActivity = useStore((state) => state.clearTerminalActivity)
   const setFocused = useStore((state) => state.setTerminalFocused)
   const showToast = useStore((state) => state.showToast)
-  const snapshot = useStore((state) => state.snapshot)
   const selectSession = useStore((state) => state.selectSession)
   const closeTerminal = useStore((state) => state.closeTerminal)
   const fontSize = useStore(
@@ -94,16 +94,35 @@ export default function TerminalTab({
   const rightClickPasteRef = useRef(rightClickPaste)
   copyOnSelectRef.current = copyOnSelect
   rightClickPasteRef.current = rightClickPaste
-  const sessionKey = snapshot?.sessions.find((item) =>
-    item.source === 'transcript' && item.id === session.sessionId && item.projectPath === session.cwd
-  )?.key ?? snapshot?.sessions.find((item) =>
-    item.source === 'transcript' && item.id === session.sessionId
-  )?.key ?? null
+  const sessionKey = useStore((state) => {
+    const sessions = state.snapshot?.sessions
+    if (!sessions || !session.sessionId) return null
+    return sessions.find((item) =>
+      item.source === 'transcript' &&
+      item.id === session.sessionId &&
+      item.projectPath === session.cwd
+    )?.key ?? sessions.find((item) =>
+      item.source === 'transcript' && item.id === session.sessionId
+    )?.key ?? null
+  })
+  const summaryKey = useStore((state) => {
+    const sessions = state.snapshot?.sessions
+    if (!sessions || !session.sessionId) return null
+    return sessions.find((item) =>
+      item.source === 'transcript' && item.id === session.sessionId
+    )?.key ?? null
+  })
+  const summaryTitle = useStore((state) => {
+    const sessions = state.snapshot?.sessions
+    if (!sessions || !session.sessionId) return null
+    return sessions.find((item) =>
+      item.source === 'transcript' && item.id === session.sessionId
+    )?.title ?? null
+  })
   const [usage, setUsage] = useState<SessionUsage | null>(null)
 
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
-  const fitRef = useRef<FitAddon | null>(null)
   const ptyIdRef = useRef<string | null>(null)
   const startRef = useRef<() => Promise<void>>(async () => undefined)
   const stopRef = useRef<() => void>(() => undefined)
@@ -139,10 +158,6 @@ export default function TerminalTab({
   const [fileMenu, setFileMenu] = useState<FileMenuTarget | null>(null)
   const menuRef = useRef<HTMLDivElement>(null)
   const claudeMenuRef = useRef<HTMLDivElement>(null)
-
-  const summary = snapshot?.sessions.find(
-    (item) => item.id === session.sessionId && item.source === 'transcript'
-  )
 
   useEffect(() => {
     if (!saveDraft(session.sessionId, draft)) showToast({ kind: 'error', message: '草稿暂时无法保存到本地，请保留当前标签' })
@@ -186,9 +201,14 @@ export default function TerminalTab({
     let attachmentRevision = 0
     let writeQueue: Promise<void> = Promise.resolve()
     let bufferedSize = 0
+    let lastCols = 0
+    let lastRows = 0
+    let resizeTimer: number | undefined
+    let snapshotRefreshTimer: ReturnType<typeof setTimeout> | null = null
     const pendingData: TerminalDataEvent[] = []
     const pendingExits = new Map<string, TerminalExitEvent>()
     const context = { sessionId: session.sessionId }
+    const revealOutput = (): void => { delete container.dataset.awaitingOutput }
     const mergeAttachments = (items: Attachment[]): void => {
       if (disposed) return
       setAttachments((previous) => [...new Map([...previous, ...items].map((item) => [item.path, item])).values()])
@@ -217,9 +237,19 @@ export default function TerminalTab({
     })
     termRef.current = term
     const fit = new FitAddon()
-    fitRef.current = fit
     term.loadAddon(fit)
+    container.dataset.awaitingOutput = ''
     term.open(container)
+    const firstFrame = term.onRender(({ start, end }) => {
+      const buffer = term.buffer.active
+      for (let row = start; row <= end; row += 1) {
+        if (buffer.getLine(buffer.viewportY + row)?.translateToString(true).trim()) {
+          revealOutput()
+          firstFrame.dispose()
+          break
+        }
+      }
+    })
     const checkFile = (reference: string) => checkFileReference(context, reference)
     const fileLinks = registerTerminalFileLinks(term, activateFile, hoverFile, checkFile)
     // Claude may emit native OSC 8 hyperlinks as well as colored text. Consume
@@ -347,12 +377,6 @@ export default function TerminalTab({
       if (activeRef.current) term.focus()
     }
     window.addEventListener('csm:attachments-added', onAttachmentsAdded)
-    try {
-      fit.fit()
-    } catch {
-      // container may not be laid out yet
-    }
-
     const darkQuery = window.matchMedia('(prefers-color-scheme: dark)')
     const onThemeChange = (): void => {
       const forced = themeSettingRef.current
@@ -428,17 +452,30 @@ export default function TerminalTab({
     const resize = (): void => {
       if (disposed || !activeRef.current || container.clientWidth === 0 || container.clientHeight === 0) return
       try {
-        fit.fit()
+        const size = fit.proposeDimensions()
+        if (!size || !Number.isFinite(size.cols) || !Number.isFinite(size.rows)) return
+        const cols = Math.max(20, Math.min(1000, size.cols))
+        const rows = Math.max(5, Math.min(500, size.rows))
+        if (cols !== term.cols || rows !== term.rows) term.resize(cols, rows)
       } catch {
         return
       }
       const ptyId = ptyIdRef.current
-      if (ptyId && term.cols >= 20 && term.rows >= 5) {
+      if (ptyId && term.cols >= 20 && term.rows >= 5 &&
+        (term.cols !== lastCols || term.rows !== lastRows)) {
+        lastCols = term.cols
+        lastRows = term.rows
         void window.api.resizeTerminal(ptyId, term.cols, term.rows).catch(() => undefined)
       }
     }
-    resizeRef.current = resize
-    const observer = new ResizeObserver(() => requestAnimationFrame(resize))
+    const scheduleResize = (): void => {
+      window.clearTimeout(resizeTimer)
+      if (disposed || !activeRef.current) return
+      // A transient layout change should not redraw Claude at two different sizes.
+      resizeTimer = window.setTimeout(resize, 75)
+    }
+    resizeRef.current = scheduleResize
+    const observer = new ResizeObserver(scheduleResize)
     observer.observe(container)
 
     const startPty = async (): Promise<void> => {
@@ -458,20 +495,33 @@ export default function TerminalTab({
           if (disposed) return
           useStore.getState().setSnapshot(snapshot)
         }
-        const forkPending = session.kind === 'fork' &&
-          Boolean(session.forkFromSessionId) &&
-          !useStore.getState().snapshot?.sessions.some((item) => item.id === session.sessionId)
+        const indexedSession = useStore.getState().snapshot?.sessions.some((item) => item.id === session.sessionId)
+        const forkPending = session.kind === 'fork' && Boolean(session.forkFromSessionId) && !indexedSession
+        const revision = attachmentRevision
+        if (indexedSession || hasLaunched || session.dormant) {
+          const items = await window.api.listAttachments(context).catch(() => null)
+          if (disposed) return
+          if (items && revision === attachmentRevision) {
+            // The attachment bar affects the initial terminal height.
+            flushSync(() => setAttachments(items))
+          }
+        }
+        // Fit immediately before spawning so the PTY starts at the final
+        // layout size and does not receive a redundant resize afterwards.
+        resize()
+        const cols = Math.max(20, Math.min(1000, term.cols || 100))
+        const rows = Math.max(5, Math.min(500, term.rows || 30))
         const result = await window.api.startTerminal({
           cwd: session.cwd,
           ...(forkPending
             ? { newSessionId: session.sessionId, forkFromSessionId: session.forkFromSessionId }
-            : session.kind === 'resume' || useStore.getState().snapshot?.sessions.some((s) => s.id === session.sessionId)
+            : session.kind === 'resume' || indexedSession
               ? { sessionId: session.sessionId ?? null }
               : { newSessionId: session.sessionId }),
           title: session.sessionTitle ?? session.projectName,
           mode: session.mode,
-          cols: Math.max(20, Math.min(1000, term.cols || 100)),
-          rows: Math.max(5, Math.min(500, term.rows || 30))
+          cols,
+          rows
         })
         if (disposed) {
           if (result.ok && result.ptyId) void window.api.stopTerminal(result.ptyId).catch(() => undefined)
@@ -479,12 +529,12 @@ export default function TerminalTab({
         }
         if (!result.ok || !result.ptyId) throw new Error(result.message ?? '启动 Claude 终端失败')
         hasLaunched = true
-        const revision = attachmentRevision
-        void window.api.listAttachments(context).then((items) => {
-          if (revision === attachmentRevision && !disposed) setAttachments(items)
-        }).catch(() => undefined)
 
         ptyIdRef.current = result.ptyId ?? null
+        // The PTY already started at these dimensions; do not send an
+        // identical resize that would make Claude redraw once.
+        lastCols = cols
+        lastRows = rows
         for (const event of pendingData) {
           if (event.ptyId === result.ptyId) term.write(event.data)
         }
@@ -495,10 +545,22 @@ export default function TerminalTab({
           term.writeln(`\r\n[Claude 已退出，代码 ${earlyExit.exitCode}]`)
           return
         }
+        if (!indexedSession || session.kind === 'new') {
+          // One-shot indexing only: auto refresh is paused while a terminal
+          // tab is active, but a new session still needs its summary, menu
+          // and usage header to appear.
+          if (snapshotRefreshTimer) clearTimeout(snapshotRefreshTimer)
+          snapshotRefreshTimer = setTimeout(() => {
+            snapshotRefreshTimer = null
+            if (disposed) return
+            void window.api.refresh().then((snapshot) => {
+              if (!disposed) useStore.getState().setSnapshot(snapshot)
+            }).catch(() => undefined)
+          }, 3000)
+        }
         setRunning(true)
         setStatus(session.key, 'running')
-        if (activeRef.current) term.focus()
-        requestAnimationFrame(resize)
+        scheduleResize()
       } catch (error) {
         if (!disposed) {
           const message = error instanceof Error ? error.message : String(error)
@@ -568,6 +630,9 @@ export default function TerminalTab({
       offData()
       offExit()
       observer.disconnect()
+      window.clearTimeout(resizeTimer)
+      if (snapshotRefreshTimer) clearTimeout(snapshotRefreshTimer)
+      firstFrame.dispose()
       fileLinks.dispose()
       nativeFileLinks.dispose()
       container.removeEventListener('paste', onPaste, true)
@@ -578,7 +643,6 @@ export default function TerminalTab({
       textarea?.removeEventListener('blur', onBlur, true)
       term.dispose()
       termRef.current = null
-      fitRef.current = null
       setFocused(false)
     }
   }, [session.key, setFocused, setStatus, showToast, clearTerminalActivity])
@@ -601,10 +665,12 @@ export default function TerminalTab({
       setUsage(null)
       return undefined
     }
+    if (!active) return undefined
     let cancelled = false
     const load = (): void => {
       void window.api.getSessionUsage(sessionKey).then((value) => {
-        if (!cancelled) setUsage(value)
+        if (cancelled) return
+        setUsage((previous) => sameUsage(previous, value) ? previous : value)
       }).catch(() => undefined)
     }
     load()
@@ -613,7 +679,7 @@ export default function TerminalTab({
       cancelled = true
       window.clearInterval(timer)
     }
-  }, [sessionKey])
+  }, [sessionKey, active])
 
   useEffect(() => {
     if (!active) {
@@ -622,13 +688,9 @@ export default function TerminalTab({
       return
     }
     const timer = requestAnimationFrame(() => {
-      try {
-        fitRef.current?.fit()
-      } catch {
-        // ignore
-      }
       resizeRef.current()
-      if (draftRef.current.text || draftRef.current.files.length) draftInputRef.current?.focus()
+      if (document.querySelector('[aria-modal="true"]') || document.activeElement?.matches('input, textarea, [contenteditable="true"]')) return
+      if (draftRef.current.text || draftRef.current.files.length) draftInputRef.current?.focus({ preventScroll: true })
       else termRef.current?.focus()
     })
     return () => cancelAnimationFrame(timer)
@@ -651,9 +713,11 @@ export default function TerminalTab({
         ? '等待确认'
         : activity === 'working'
           ? '工作中…'
-          : activity === 'idle'
-            ? '等待输入'
-            : '运行中'
+          : activity === 'background'
+            ? '后台任务中…'
+            : activity === 'idle'
+              ? '等待输入'
+              : '运行中'
       : session.dormant === true && !launched
         ? '未启动'
         : '已结束'
@@ -682,11 +746,11 @@ export default function TerminalTab({
   }
 
   const removeSession = async (): Promise<void> => {
-    if (!summary) return
+    if (!summaryKey) return
     setConfirmDelete(false)
     const ptyId = ptyIdRef.current
     if (ptyId) await window.api.stopTerminal(ptyId).catch(() => undefined)
-    const result = await deleteSession(summary.key)
+    const result = await deleteSession(summaryKey)
     if (result.ok) closeTerminal(session.key)
   }
 
@@ -718,16 +782,16 @@ export default function TerminalTab({
           </span>
         </div>
         <span className="terminal-mode">权限：{MODE_LABELS[session.mode]}</span>
-        {usage && usage.model && (
-          <span className="terminal-usage" title={usageTitle}>
+        <span className="terminal-usage" title={usageTitle || undefined}>
+          {usage?.model && <>
             <span className="terminal-model">{usage.model}</span>
             {usage.contextPercent !== null && usage.contextLimit !== null && (
               <span className={`terminal-context ${usage.contextPercent >= 80 ? 'high' : ''}`}>
                 上下文 {usage.contextPercent.toFixed(0)}%
               </span>
             )}
-          </span>
-        )}
+          </>}
+        </span>
         <span className={`terminal-status ${running ? 'running' : 'stopped'} ${running ? activity ?? '' : ''}`}>
           <span className="terminal-dot" />
           {status}
@@ -802,36 +866,36 @@ export default function TerminalTab({
             </button>
             {menuOpen && (
               <div className="menu" role="menu">
-                {summary && (
+                {summaryKey && (
                   <button
                     role="menuitem"
                     onClick={() => {
                       setMenuOpen(false)
-                      selectSession(summary.key)
+                      selectSession(summaryKey)
                     }}
                   >
                     <FileText size={14} />
                     查看会话记录
                   </button>
                 )}
-                {summary && (
+                {summaryKey && (
                   <button
                     role="menuitem"
                     onClick={() => {
                       setMenuOpen(false)
-                      void resumeSession(summary.key)
+                      void resumeSession(summaryKey)
                     }}
                   >
                     <TerminalIcon size={14} />
                     在终端中恢复
                   </button>
                 )}
-                {summary && (
+                {summaryKey && (
                   <button
                     role="menuitem"
                     onClick={() => {
                       setMenuOpen(false)
-                      void exportSession(summary.key)
+                      void exportSession(summaryKey)
                     }}
                   >
                     <Download size={14} />
@@ -855,7 +919,7 @@ export default function TerminalTab({
                   <FolderOpen size={14} />
                   在项目中打开
                 </button>
-                {summary && (
+                {summaryKey && (
                   <button
                     role="menuitem"
                     className="danger"
@@ -980,14 +1044,14 @@ export default function TerminalTab({
         />
       )}
 
-      {confirmDelete && summary && (
+      {confirmDelete && summaryKey && (
         <ConfirmDialog
           title="删除会话"
           confirmLabel="删除并关闭"
           danger
           message={
             <p>
-              将删除「{summary.title}」及其附属数据，并移入系统回收站；
+              将删除「{summaryTitle ?? summaryKey}」及其附属数据，并移入系统回收站；
               当前终端会先结束，随后关闭该标签。
             </p>
           }
@@ -998,3 +1062,5 @@ export default function TerminalTab({
     </div>
   )
 }
+
+export default memo(TerminalTab)

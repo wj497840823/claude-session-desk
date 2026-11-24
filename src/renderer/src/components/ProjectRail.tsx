@@ -53,7 +53,6 @@ export default function ProjectRail(): React.JSX.Element {
   const showToast = useStore((state) => state.showToast)
   const setScheduledTasksOpen = useStore((state) => state.setScheduledTasksOpen)
   const openClaudeMdEditor = useStore((state) => state.openClaudeMdEditor)
-  const gitStatuses = useStore((state) => state.gitStatuses)
   const openGitPanel = useStore((state) => state.openGitPanel)
   const archived = useStore((state) => state.archived)
   const terminals = useStore((state) => state.terminals)
@@ -95,7 +94,7 @@ export default function ProjectRail(): React.JSX.Element {
   const activityLabel = (tab: (typeof terminals)[number]): string => {
     if (terminalStatus[tab.key] === 'starting') return '启动中'
     const activity = tab.sessionId ? terminalActivity[tab.sessionId] : undefined
-    return activity === 'approval' ? '等待确认' : activity === 'working' ? '工作中' : activity === 'idle' ? '等待输入' : '运行中'
+    return activity === 'approval' ? '等待确认' : activity === 'working' ? '工作中' : activity === 'background' ? '后台任务中' : activity === 'idle' ? '等待输入' : '运行中'
   }
   const activeProjects =
     snapshot?.projects.filter((project) =>
@@ -241,33 +240,15 @@ export default function ProjectRail(): React.JSX.Element {
     setPendingDelete({ kind: 'project', project })
   }
 
-  const gitBadge = (projectKey: string): React.JSX.Element | null => {
-    const status = gitStatuses[projectKey]
-    if (!status?.isRepo || status.counts.files === 0) return null
-    const kind =
-      status.counts.unmerged > 0
-        ? 'conflict'
-        : status.counts.staged + status.counts.unstaged > 0
-          ? 'tracked'
-          : 'untracked'
-    return (
-      <button
-        className={`rail-git-badge ${kind}`}
-        title={`已暂存 ${status.counts.staged} · 未暂存 ${status.counts.unstaged} · 未跟踪 ${status.counts.untracked} · 冲突 ${status.counts.unmerged}`}
-        aria-label={`查看 Git 变更，共 ${status.counts.files} 个文件`}
-        onClick={(event) => {
-          event.stopPropagation()
-          openGitPanel(projectKey)
-        }}
-      >
-        ●{status.counts.files}
-      </button>
-    )
-  }
-
   return (
     <>
       <aside className="rail" aria-label="项目与会话" onScroll={() => closeContextMenu()}>
+        {snapshot && !snapshot.dataRootExists && (
+          <div className="notice" title={snapshot.dataRoot}>尚未找到会话目录。你可以选择项目文件夹新建对话。</div>
+        )}
+        {snapshot && snapshot.skippedFiles > 0 && (
+          <div className="notice">有 {snapshot.skippedFiles} 个会话文件无法读取，已跳过。</div>
+        )}
         <nav className="rail-nav">
           <button
             className={`rail-item ${view.type === 'all' ? 'active' : ''}`}
@@ -400,7 +381,6 @@ export default function ProjectRail(): React.JSX.Element {
                 )}
                 <span className="rail-count">{visibleCountFor(project.key)}</span>
               </button>
-              {gitBadge(project.key)}
               {project.path && (
                 <button
                   className="rail-project-open rail-project-chat"

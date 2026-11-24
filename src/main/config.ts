@@ -108,7 +108,11 @@ function normalizeSettings(raw: Partial<AppSettings> | undefined): AppSettings {
         settings.sessionClickAction as SessionClickAction
       )
         ? (settings.sessionClickAction as SessionClickAction)
-        : DEFAULT_APP_SETTINGS.sessionClickAction
+        : DEFAULT_APP_SETTINGS.sessionClickAction,
+    localApiEnabled:
+      typeof settings.localApiEnabled === 'boolean'
+        ? settings.localApiEnabled
+        : DEFAULT_APP_SETTINGS.localApiEnabled
   }
 }
 

@@ -13,6 +13,8 @@ import { basename, dirname, extname, join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import type {
   ClaudeMdFileInfo,
+  ClaudeMdLocationInfo,
+  ClaudeMdPlacement,
   ClaudeMdSaveInput,
   ClaudeMdSaveResult,
   ClaudeMdScope,
@@ -46,6 +48,7 @@ interface TemplateStore {
 export interface ClaudeMdTarget {
   scope: ClaudeMdScope
   projectKey?: string
+  placement?: ClaudeMdPlacement
 }
 
 export interface ClaudeMdServiceOptions {
@@ -57,6 +60,12 @@ export interface ClaudeMdServiceOptions {
 function normalizeScope(value: unknown): ClaudeMdScope {
   if (value === 'global' || value === 'project') return value
   throw new Error('非法的 CLAUDE.md 作用域')
+}
+
+function normalizePlacement(value: unknown): ClaudeMdPlacement {
+  if (value === undefined || value === null || value === 'root') return 'root'
+  if (value === 'claude-dir') return 'claude-dir'
+  throw new Error('非法的 CLAUDE.md 位置')
 }
 
 function validateContent(value: unknown): string {
@@ -160,13 +169,10 @@ export class ClaudeMdService {
     return pending
   }
 
-  private async resolveTarget(target: ClaudeMdTarget): Promise<string> {
-    const scope = normalizeScope(target.scope)
-    if (scope === 'global') return join(this.homeDir, '.claude', 'CLAUDE.md')
-
-    const projectKey = target.projectKey?.trim()
-    if (!projectKey) throw new Error('缺少项目标识')
-    const projectPath = await this.resolveProjectPath(projectKey)
+  private async resolveProjectDirectory(projectKey: string | undefined): Promise<string> {
+    const key = projectKey?.trim()
+    if (!key) throw new Error('缺少项目标识')
+    const projectPath = await this.resolveProjectPath(key)
     if (!projectPath) throw new Error('项目不存在或尚未加载')
 
     let info: Stats
@@ -176,22 +182,69 @@ export class ClaudeMdService {
       throw new Error('项目文件夹不存在')
     }
     if (!info.isDirectory()) throw new Error('项目路径不是文件夹')
-    return join(resolve(projectPath), 'CLAUDE.md')
+    return resolve(projectPath)
+  }
+
+  private async resolveTarget(
+    target: ClaudeMdTarget
+  ): Promise<{ path: string; placement?: ClaudeMdPlacement }> {
+    const scope = normalizeScope(target.scope)
+    if (scope === 'global') {
+      return { path: join(this.homeDir, '.claude', 'CLAUDE.md') }
+    }
+
+    const placement = normalizePlacement(target.placement)
+    const projectPath = await this.resolveProjectDirectory(target.projectKey)
+    const path = placement === 'claude-dir'
+      ? join(projectPath, '.claude', 'CLAUDE.md')
+      : join(projectPath, 'CLAUDE.md')
+    return { path, placement }
   }
 
   async read(target: ClaudeMdTarget): Promise<ClaudeMdFileInfo> {
     const scope = normalizeScope(target.scope)
-    const path = await this.resolveTarget({ scope, projectKey: target.projectKey })
-    return this.readResolved(path, scope)
+    const resolved = await this.resolveTarget({
+      scope,
+      projectKey: target.projectKey,
+      placement: target.placement
+    })
+    return this.readResolved(resolved.path, scope, resolved.placement)
   }
 
-  private async readResolved(path: string, scope: ClaudeMdScope): Promise<ClaudeMdFileInfo> {
+  async locations(target: ClaudeMdTarget): Promise<ClaudeMdLocationInfo[]> {
+    const scope = normalizeScope(target.scope)
+    if (scope === 'global') return []
+    const projectPath = await this.resolveProjectDirectory(target.projectKey)
+    const entries: Array<{ placement: ClaudeMdPlacement; path: string }> = [
+      { placement: 'root', path: join(projectPath, 'CLAUDE.md') },
+      { placement: 'claude-dir', path: join(projectPath, '.claude', 'CLAUDE.md') }
+    ]
+    const result: ClaudeMdLocationInfo[] = []
+    for (const entry of entries) {
+      let exists = false
+      try {
+        exists = (await stat(entry.path)).isFile()
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          throw new Error(fsErrorMessage(error, '无法读取 CLAUDE.md'))
+        }
+      }
+      result.push({ ...entry, exists })
+    }
+    return result
+  }
+
+  private async readResolved(
+    path: string,
+    scope: ClaudeMdScope,
+    placement?: ClaudeMdPlacement
+  ): Promise<ClaudeMdFileInfo> {
     let info: Stats
     try {
       info = await stat(path)
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        return { scope, path, exists: false, content: '' }
+        return { scope, path, exists: false, content: '', placement }
       }
       throw new Error(fsErrorMessage(error, '无法读取 CLAUDE.md'))
     }
@@ -200,10 +253,10 @@ export class ClaudeMdService {
 
     try {
       const raw = await readFile(path, 'utf8')
-      return { scope, path, exists: true, content: raw.replace(/^\uFEFF/, '') }
+      return { scope, path, exists: true, content: raw.replace(/^\uFEFF/, ''), placement }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        return { scope, path, exists: false, content: '' }
+        return { scope, path, exists: false, content: '', placement }
       }
       throw new Error(fsErrorMessage(error, '无法读取 CLAUDE.md'))
     }
@@ -212,7 +265,11 @@ export class ClaudeMdService {
   async write(input: ClaudeMdSaveInput): Promise<ClaudeMdSaveResult> {
     const scope = normalizeScope(input.scope)
     const content = validateContent(input.content)
-    const path = await this.resolveTarget({ scope, projectKey: input.projectKey })
+    const { path } = await this.resolveTarget({
+      scope,
+      projectKey: input.projectKey,
+      placement: input.placement
+    })
 
     return this.enqueue(async () => {
       let previousInfo: Stats | null = null

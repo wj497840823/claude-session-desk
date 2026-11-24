@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { HookRelayService } from '../src/main/hookRelay'
+import { ApprovalBroker } from '../src/main/approvalBroker'
+import { permissionHookOutput } from '../src/main/hookActivity'
 
 let relay: HookRelayService | null = null
 
@@ -24,6 +26,78 @@ describe('HookRelayService', () => {
     expect(await response.json()).toEqual({})
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(events).toEqual([{ hook_event_name: 'Stop' }])
+  })
+
+  it('returns the response produced by an async handler', async () => {
+    relay = new HookRelayService()
+    await relay.start()
+    relay.register('pty-1', async () => ({
+      hookSpecificOutput: {
+        hookEventName: 'PermissionRequest',
+        decision: { behavior: 'allow' }
+      }
+    }))
+    const response = await fetch(relay.urlFor('pty-1')!, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hook_event_name: 'PermissionRequest' })
+    })
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({
+      hookSpecificOutput: {
+        hookEventName: 'PermissionRequest',
+        decision: { behavior: 'allow' }
+      }
+    })
+  })
+
+  it('falls back to an empty decision when the handler throws', async () => {
+    relay = new HookRelayService()
+    await relay.start()
+    relay.register('pty-1', async () => {
+      throw new Error('boom')
+    })
+    const response = await fetch(relay.urlFor('pty-1')!, {
+      method: 'POST',
+      body: JSON.stringify({ hook_event_name: 'PermissionRequest' })
+    })
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({})
+  })
+
+  it('waits for the approval broker and returns the user decision', async () => {
+    relay = new HookRelayService()
+    await relay.start()
+    const broker = new ApprovalBroker()
+    relay.register('pty-1', async (event) => {
+      const pending = broker.request({
+        ptyId: 'pty-1',
+        sessionId: 'session-1',
+        title: '测试对话',
+        toolName: 'Bash',
+        toolInput: '{"command":"npm test"}'
+      })
+      const [request] = broker.list()
+      setTimeout(() => broker.resolve(request.id, 'allow'), 20)
+      return permissionHookOutput(await pending)
+    })
+
+    const response = await fetch(relay.urlFor('pty-1')!, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        hook_event_name: 'PermissionRequest',
+        tool_name: 'Bash',
+        tool_input: { command: 'npm test' }
+      })
+    })
+    expect(await response.json()).toEqual({
+      hookSpecificOutput: {
+        hookEventName: 'PermissionRequest',
+        decision: { behavior: 'allow' }
+      }
+    })
+    expect(broker.list()).toEqual([])
   })
 
   it('rejects unknown tokens, unknown ptys and non-POST methods', async () => {

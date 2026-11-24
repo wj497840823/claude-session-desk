@@ -14,8 +14,9 @@ import type {
 import { IPC } from '@shared/ipc'
 import { TerminalActivityTracker, stripAnsi } from './terminalActivity'
 import type { TerminalActivity } from './terminalActivity'
-import { buildHookSettings, hookEventToActivity } from './hookActivity'
+import { buildHookSettings, hookEventToActivity, permissionHookOutput } from './hookActivity'
 import type { HookRelayLike } from './hookRelay'
+import { approvalInputFromHook, type ApprovalBroker } from './approvalBroker'
 import {
   buildClaudeLaunch,
   CLAUDE_CLI_HINT,
@@ -76,6 +77,7 @@ export function terminalEnv(): Record<string, string> {
   delete env.ELECTRON_RUN_AS_NODE
   // Never inherit the parent Claude Code session identity. Otherwise the
   // embedded CLI believes it is a child session and disables transcripts.
+  delete env.CLAUDECODE
   delete env.CLAUDE_CODE_CHILD_SESSION
   delete env.CLAUDE_CODE_SESSION_ID
   delete env.CLAUDE_CODE_PARENT_SESSION_ID
@@ -117,6 +119,7 @@ export class TerminalService {
   private readonly stopping = new Map<string, Promise<void>>()
   private readonly fileContexts = new Map<string, FileScope>()
   private hookRelay: HookRelayLike | null = null
+  private approvalBroker: ApprovalBroker | null = null
   private scheduledSessionGuard: ((sessionId: string) => boolean) | null = null
 
   getFileContext(sessionId: string): FileScope | undefined {
@@ -125,6 +128,10 @@ export class TerminalService {
 
   setHookRelay(relay: HookRelayLike | null): void {
     this.hookRelay = relay
+  }
+
+  setApprovalBroker(broker: ApprovalBroker | null): void {
+    this.approvalBroker = broker
   }
 
   setScheduledSessionGuard(guard: ((sessionId: string) => boolean) | null): void {
@@ -206,7 +213,10 @@ export class TerminalService {
         rows: options.rows,
         cwd,
         env: terminalEnv(),
-        useConpty: true
+        useConpty: true,
+        // The system ConPTY can consume the synchronized-output probe and
+        // forward a frame's end marker before its buffered screen writes.
+        useConptyDll: process.platform === 'win32'
       })
 
       this.sessions.set(ptyId, child)
@@ -251,6 +261,7 @@ export class TerminalService {
 
   private releasePty(ptyId: string): void {
     this.hookRelay?.unregister(ptyId)
+    this.approvalBroker?.cancelForPty(ptyId)
     this.hookPhases.delete(ptyId)
     this.activities.get(ptyId)?.dispose()
     this.activities.delete(ptyId)
@@ -264,17 +275,36 @@ export class TerminalService {
     this.onActivity?.({ ...event, title: this.titles.get(ptyId) ?? 'Claude 对话' })
   }
 
-  private handleHookEvent(ptyId: string, sessionId: string, event: unknown): void {
+  private async handleHookEvent(
+    ptyId: string,
+    sessionId: string,
+    event: unknown
+  ): Promise<unknown> {
     const activity = hookEventToActivity(event)
     // Only a recognized hook event proves hooks are live. An unknown or
     // malformed payload must not disable the PTY-based fallback.
-    if (!activity) return
+    if (!activity) return undefined
     const tracker = this.activities.get(ptyId)
     if (tracker) {
       tracker.dispose()
       this.activities.delete(ptyId)
     }
     this.applyActivity(ptyId, sessionId, activity)
+
+    if (activity !== 'approval' || !this.approvalBroker) return undefined
+    const input = approvalInputFromHook(
+      event,
+      ptyId,
+      sessionId,
+      this.titles.get(ptyId) ?? 'Claude 对话'
+    )
+    if (!input) return undefined
+    const decision = await this.approvalBroker.request(input)
+    // While waiting, the terminal stays in "approval"; once a decision is made
+    // Claude resumes work (an allow continues the tool call, a deny continues
+    // the turn).
+    if (decision) this.applyActivity(ptyId, sessionId, 'working')
+    return permissionHookOutput(decision)
   }
 
   private noteHookInput(ptyId: string, data: string): void {
@@ -316,7 +346,8 @@ export class TerminalService {
     ) {
       throw new Error('非法终端尺寸')
     }
-    this.sessions.get(ptyId)?.resize(columns, terminalRows)
+    const child = this.sessions.get(ptyId)
+    if (child && (child.cols !== columns || child.rows !== terminalRows)) child.resize(columns, terminalRows)
   }
 
   async stop(ptyId: string): Promise<void> {

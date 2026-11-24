@@ -12,8 +12,17 @@ export type SessionClickAction = 'continue' | 'record'
 
 export type ClaudeMdScope = 'global' | 'project'
 
+export type ClaudeMdPlacement = 'root' | 'claude-dir'
+
+export interface ClaudeMdLocationInfo {
+  placement: ClaudeMdPlacement
+  path: string
+  exists: boolean
+}
+
 export interface ClaudeMdFileInfo {
   scope: ClaudeMdScope
+  placement?: ClaudeMdPlacement
   path: string
   exists: boolean
   content: string
@@ -22,6 +31,7 @@ export interface ClaudeMdFileInfo {
 export interface ClaudeMdSaveInput {
   scope: ClaudeMdScope
   projectKey?: string
+  placement?: ClaudeMdPlacement
   content: string
 }
 
@@ -67,6 +77,7 @@ export interface AppSettings {
   defaultPermissionMode: TerminalPermissionMode
   terminalFontSize: number
   sessionClickAction: SessionClickAction
+  localApiEnabled: boolean
 }
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
@@ -78,7 +89,8 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   theme: 'system',
   defaultPermissionMode: 'follow',
   terminalFontSize: 13,
-  sessionClickAction: 'continue'
+  sessionClickAction: 'continue',
+  localApiEnabled: false
 }
 
 export interface TerminalStartOptions {
@@ -92,7 +104,7 @@ export interface TerminalStartOptions {
   rows: number
 }
 
-export type TerminalActivity = 'working' | 'idle' | 'approval'
+export type TerminalActivity = 'working' | 'idle' | 'approval' | 'background'
 
 export interface TerminalActivityEvent {
   ptyId: string
@@ -106,6 +118,56 @@ export interface AttentionSummary {
   approval: number
 }
 
+export type ApprovalDecision = 'allow' | 'deny'
+
+export interface ApprovalRequest {
+  id: string
+  ptyId: string
+  sessionId: string
+  title: string
+  toolName: string
+  toolInput: string
+  cwd?: string
+  createdAt: number
+  expiresAt: number
+}
+
+export interface ApprovalInboxItem extends ApprovalRequest {
+  kind: 'approval'
+}
+
+export interface ScheduledTaskInboxItem {
+  kind: 'task'
+  /** Run id; also the id used to dismiss the item. */
+  id: string
+  taskId: string
+  taskName: string
+  projectPath: string
+  runId: string
+  status: 'success' | 'failed' | 'timeout'
+  endedAt: number
+  attempt?: number
+  sessionId?: string
+  outputTail: string
+  retryAt?: number
+}
+
+export interface AskInboxItem {
+  kind: 'ask'
+  id: string
+  taskId: string
+  taskName: string
+  projectPath: string
+  runId: string
+  title: string
+  text: string
+  options: string[]
+  askedAt: number
+  sessionId?: string
+}
+
+export type InboxItem = ApprovalInboxItem | AskInboxItem | ScheduledTaskInboxItem
+
 export type ScheduleSpec =
   | { kind: 'once'; at: number }
   | { kind: 'daily'; time: string }
@@ -114,6 +176,59 @@ export type ScheduleSpec =
 
 export type ScheduledTaskType = 'claude' | 'command'
 export type ScheduledTaskRunStatus = 'success' | 'failed' | 'timeout' | 'cancelled'
+
+export type ScheduledTaskTrigger =
+  | { kind: 'file'; path: string }
+  | { kind: 'git' }
+  | { kind: 'event'; type: string }
+
+export interface ExternalEvent {
+  type: string
+  subject?: string
+  summary?: string
+  detail?: string
+  link?: string
+}
+
+export interface EventDispatchResult {
+  matched: string[]
+  skipped: string[]
+}
+
+export interface LocalApiInfo {
+  enabled: boolean
+  url: string | null
+  token: string | null
+}
+
+export interface SkippedTrigger {
+  taskId: string
+  at: number
+  reason: string
+}
+
+export interface ScheduledTaskRetry {
+  /** Number of the next attempt (the first run is attempt 1). */
+  attempt: number
+  /** Earliest time the retry may start. */
+  at: number
+  /** Session to resume when the failed run actually started. */
+  sessionId?: string
+  reason?: string
+  /** Keep the manual-run semantics for once tasks across retries. */
+  manual?: boolean
+  /** Waiting for Claude's usage limit to reset rather than a normal backoff. */
+  limit?: boolean
+}
+
+export interface ScheduledTaskAsk {
+  runId: string
+  sessionId?: string
+  title: string
+  text: string
+  options: string[]
+  askedAt: number
+}
 
 export interface ScheduledTaskRun {
   id: string
@@ -124,6 +239,10 @@ export interface ScheduledTaskRun {
   logPath: string
   outputTail: string
   sessionId?: string
+  attempt?: number
+  retryAt?: number
+  model?: string
+  usage?: TokenUsage
 }
 
 export interface ScheduledTask {
@@ -144,12 +263,28 @@ export interface ScheduledTask {
   updatedAt: number
   nextRun?: number
   lastRun?: ScheduledTaskRun
+  retry?: ScheduledTaskRetry
+  trigger?: ScheduledTaskTrigger
+  pendingAsk?: ScheduledTaskAsk
+  pausedUntil?: number
+  pauseReason?: string
+  skippedTriggerCount?: number
   running?: boolean
 }
 
 export type ScheduledTaskInput = Omit<
   ScheduledTask,
-  'id' | 'createdAt' | 'updatedAt' | 'nextRun' | 'lastRun' | 'running'
+  | 'id'
+  | 'createdAt'
+  | 'updatedAt'
+  | 'nextRun'
+  | 'lastRun'
+  | 'retry'
+  | 'pendingAsk'
+  | 'pausedUntil'
+  | 'pauseReason'
+  | 'skippedTriggerCount'
+  | 'running'
 >
 
 export interface ScheduledTaskLog {
@@ -282,6 +417,27 @@ export interface TokenUsage {
   outputTokens: number
   cacheReadTokens: number
   cacheWriteTokens: number
+}
+
+export interface UsageTotals extends TokenUsage {
+  runs: number
+  missingUsageRuns: number
+  unpricedRuns: number
+  costUSD: number | null
+}
+
+export interface ScheduledTaskUsage {
+  taskId: string
+  taskName: string
+  projectPath: string
+  totals: UsageTotals
+}
+
+export interface UsageSummary {
+  today: UsageTotals
+  week: UsageTotals
+  tasks: ScheduledTaskUsage[]
+  generatedAt: number
 }
 
 export interface SessionUsage extends TokenUsage {
@@ -444,6 +600,12 @@ export interface ClaudeViewApi {
   captureScreenshot(context: FileContext): Promise<Attachment[]>
   onScreenshotTrigger(callback: () => void): () => void
   updateAttention(summary: AttentionSummary): Promise<void>
+  listInbox(): Promise<InboxItem[]>
+  dismissInboxItem(id: string): Promise<boolean>
+  listApprovals(): Promise<ApprovalRequest[]>
+  resolveApproval(id: string, decision: ApprovalDecision): Promise<boolean>
+  onApprovalsChanged(callback: (requests: ApprovalRequest[]) => void): () => void
+  onApprovalsOpen(callback: () => void): () => void
   listScheduledTasks(): Promise<ScheduledTask[]>
   createScheduledTask(input: ScheduledTaskInput): Promise<ScheduledTask>
   updateScheduledTask(id: string, input: ScheduledTaskInput): Promise<ScheduledTask>
@@ -451,11 +613,26 @@ export interface ClaudeViewApi {
   setScheduledTaskEnabled(id: string, enabled: boolean): Promise<ScheduledTask>
   runScheduledTask(id: string): Promise<ActionResult>
   cancelScheduledTask(id: string): Promise<ActionResult>
+  pauseScheduledTask(id: string, until: number, reason?: string): Promise<ScheduledTask>
+  resumeScheduledTask(id: string): Promise<{ task: ScheduledTask; skipped: number }>
+  replayScheduledTask(id: string): Promise<ActionResult>
+  answerScheduledAsk(id: string, answer: { choice?: number; text?: string }): Promise<ActionResult>
+  ignoreScheduledAsk(id: string): Promise<ActionResult>
+  getUsageSummary(): Promise<UsageSummary>
+  getLocalApiInfo(): Promise<LocalApiInfo>
   listScheduledTaskRuns(id: string): Promise<ScheduledTaskRun[]>
   readScheduledTaskLog(id: string, runId: string): Promise<ScheduledTaskLog>
   onSchedulesChanged(callback: () => void): () => void
-  readClaudeMd(scope: ClaudeMdScope, projectKey?: string): Promise<ClaudeMdFileInfo>
+  readClaudeMd(
+    scope: ClaudeMdScope,
+    projectKey?: string,
+    placement?: ClaudeMdPlacement
+  ): Promise<ClaudeMdFileInfo>
   writeClaudeMd(input: ClaudeMdSaveInput): Promise<ClaudeMdSaveResult>
+  getClaudeMdLocations(
+    scope: ClaudeMdScope,
+    projectKey?: string
+  ): Promise<ClaudeMdLocationInfo[]>
   listClaudeMdTemplates(): Promise<ClaudeMdTemplate[]>
   saveClaudeMdTemplate(input: ClaudeMdTemplateInput): Promise<ClaudeMdTemplate>
   deleteClaudeMdTemplate(id: string): Promise<void>
@@ -470,5 +647,6 @@ export interface ClaudeViewApi {
   unstageAllGit(projectKey: string): Promise<ActionResult>
   commitGit(projectKey: string, message: string, skipHooks: boolean): Promise<GitCommitResult>
   updateSettings(patch: Partial<AppSettings>): Promise<AppSettings>
+  setSessionRefreshInterest(interest: boolean): Promise<void>
   onDataChanged(callback: () => void): () => void
 }

@@ -4,7 +4,8 @@ import {
   PanelLeftOpen,
   RefreshCw,
   Search,
-  Settings
+  Settings,
+  ShieldAlert
 } from 'lucide-react'
 import { useEffect, useRef } from 'react'
 import { refreshSnapshot } from '../lib/actions'
@@ -35,6 +36,9 @@ export default function TopBar(): React.JSX.Element {
   const toggleSessionList = useStore((state) => state.toggleSessionList)
   const terminals = useStore((state) => state.terminals)
   const attention = useStore((state) => state.attention)
+  const inbox = useStore((state) => state.inbox)
+  const approvalPanelOpen = useStore((state) => state.approvalPanelOpen)
+  const setApprovalPanelOpen = useStore((state) => state.setApprovalPanelOpen)
   const setActiveTerminal = useStore((state) => state.setActiveTerminal)
   const clearAllAttention = useStore((state) => state.clearAllAttention)
   const attentionCount = Object.keys(attention).length
@@ -104,6 +108,16 @@ export default function TopBar(): React.JSX.Element {
         )}
       </div>
       <div className="topbar-meta">
+        {inbox.length > 0 && (
+          <button
+            className={`approval-chip ${approvalPanelOpen ? 'active' : ''}`}
+            onClick={() => setApprovalPanelOpen(!approvalPanelOpen)}
+            title="查看等待处理的确认与任务结果"
+          >
+            <ShieldAlert size={13} />
+            待处理 {inbox.length}
+          </button>
+        )}
         {attentionCount > 0 && (
           <div className="attention-chip" role="status">
             <button

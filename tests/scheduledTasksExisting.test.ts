@@ -43,7 +43,7 @@ function fakeChild(exitCode = 0): FakeChild {
   child.pid = 4242
   child.killed = false
   child.kill = vi.fn()
-  setTimeout(() => child.emit('close', exitCode), 20)
+  setTimeout(() => child.emit('close', exitCode), 100)
   return child
 }
 
@@ -55,6 +55,17 @@ function failingSpawnChild(): FakeChild {
   child.killed = false
   child.kill = vi.fn()
   setTimeout(() => child.emit('error', new Error('spawn ENOENT')), 20)
+  return child
+}
+
+function slowChild(closeAfter = 200): FakeChild {
+  const child = new EventEmitter() as FakeChild
+  child.stdout = new EventEmitter()
+  child.stderr = new EventEmitter()
+  child.pid = 4244
+  child.killed = false
+  child.kill = vi.fn()
+  setTimeout(() => child.emit('close', 0), closeAfter)
   return child
 }
 
@@ -101,6 +112,31 @@ async function waitFor(check: () => boolean, timeout = 10_000): Promise<void> {
 }
 
 describe('ScheduledTaskService existing-session mode', () => {
+  it('does not recreate a task deleted while its edit validates the session', async () => {
+    let releaseValidation!: () => void
+    let validationStarted!: () => void
+    const started = new Promise<void>((resolve) => { validationStarted = resolve })
+    const waitForValidation = new Promise<void>((resolve) => { releaseValidation = resolve })
+    let defer = false
+    let projectPath = ''
+    const { project, service } = await fixture(async () => {
+      if (defer) {
+        validationStarted()
+        await waitForValidation
+      }
+      return { projectPath, source: 'transcript', cwdExists: true }
+    })
+    projectPath = project
+    const task = await service.create(input(project))
+    defer = true
+    const edit = service.update(task.id, input(project, { name: '修改后的任务' }))
+    await started
+    await service.remove(task.id)
+    releaseValidation()
+    await expect(edit).rejects.toThrow('定时任务不存在')
+    expect(service.list()).toEqual([])
+  })
+
   it('requires a session id when appending to an existing session', async () => {
     const { project, service } = await fixture()
     await expect(service.create(input(project, { resumeSessionId: undefined })))
@@ -138,6 +174,38 @@ describe('ScheduledTaskService existing-session mode', () => {
     expect(service.list().find((item) => item.id === task.id)?.lastRun).toBeUndefined()
   })
 
+  it('tracks the generated session while a new-session task runs', async () => {
+    mocks.spawn.mockImplementation(() => slowChild())
+    const { project, service } = await fixture()
+    const task = await service.create(input(project, {
+      sessionMode: 'new',
+      resumeSessionId: undefined
+    }))
+
+    expect(await service.runNow(task.id)).toEqual({ ok: true })
+    await waitFor(() => mocks.spawn.mock.calls.length > 0)
+    const args = mocks.spawn.mock.calls[0][1] as string[]
+    const sessionId = args[args.indexOf('--session-id') + 1]
+    expect(sessionId).toBeTruthy()
+    expect(service.isSessionRunning(sessionId)).toBe(true)
+    await waitFor(() => !service.list().find((item) => item.id === task.id)?.running)
+    expect(service.isSessionRunning(sessionId)).toBe(false)
+  })
+
+  it('refuses to start a second task for the same session', async () => {
+    mocks.spawn.mockImplementation(() => slowChild())
+    const { project, service } = await fixture()
+    const first = await service.create(input(project, { name: '任务 A' }))
+    const second = await service.create(input(project, { name: '任务 B' }))
+
+    expect(await service.runNow(first.id)).toEqual({ ok: true })
+    await waitFor(() => mocks.spawn.mock.calls.length > 0)
+    const secondResult = await service.runNow(second.id)
+    expect(secondResult.ok).toBe(false)
+    expect(secondResult.message).toContain('另一个定时任务')
+    await waitFor(() => !service.list().find((item) => item.id === first.id)?.running)
+  })
+
   it('reports the target session as running while the task is active', async () => {
     mocks.spawn.mockImplementation(() => fakeChild())
     const { project, service } = await fixture()
@@ -164,7 +232,7 @@ describe('ScheduledTaskService existing-session mode', () => {
     expect(args[args.indexOf('--resume') + 1]).toBe(SESSION_ID)
     expect(args).not.toContain('--session-id')
     expect(args).toContain('-p')
-    expect(args).toContain('继续之前的任务')
+    expect(args[args.indexOf('-p') + 1]).toContain('继续之前的任务')
     expect(mocks.spawn.mock.calls[0][2]).toMatchObject({ cwd: project })
 
     const updated = service.list().find((item) => item.id === task.id)

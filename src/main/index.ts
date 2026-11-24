@@ -18,13 +18,18 @@ import { registerIpc } from './ipc'
 import { AppServices } from './services'
 import { TerminalService } from './terminal'
 import { HookRelayService } from './hookRelay'
+import { ApprovalBroker } from './approvalBroker'
 import { ScheduledTaskService } from './scheduledTasks'
+import { TriggerService } from './triggers'
+import { LocalApiService, loadOrCreateApiToken } from './localApi'
+import { buildInbox } from './inbox'
 import { watchDataRoot } from './watcher'
 import { externalWebUrl } from './validation'
 import { FileService } from './files'
 import { ClaudeMdService } from './claudeMd'
 import { GitService } from './git'
 
+app.setName('Claude Session Desk')
 app.setPath('userData', process.env.CLAUDE_SESSION_MANAGER_USER_DATA ||
   join(app.getPath('appData'), 'claude-session-manager'))
 if (process.platform === 'win32') app.setAppUserModelId('com.local.claude-session-manager')
@@ -39,18 +44,19 @@ let desktopNotifications = true
 const notifiedAt = new Map<string, number>()
 
 function notifyTerminalActivity(event: TerminalActivityEvent & { title: string }): void {
-  if (!desktopNotifications || event.activity === 'working' || !event.sessionId) return
+  // Permission requests are announced by the approval broker, which has the
+  // tool details and an "open approvals" action.
+  if (!desktopNotifications || event.activity !== 'idle' || !event.sessionId) return
   if (!Notification.isSupported()) return
   const window = mainWindow
   if (window && !window.isDestroyed() && window.isVisible() && !window.isMinimized() && window.isFocused()) return
   const now = Date.now()
   if (now - (notifiedAt.get(event.sessionId) ?? 0) < 4000) return
   notifiedAt.set(event.sessionId, now)
-  const approval = event.activity === 'approval'
   try {
     const notification = new Notification({
-      title: `${event.title || 'Claude 对话'} · ${approval ? '等待确认' : '回复完成'}`,
-      body: approval ? 'Claude 正在等待你批准操作。' : '可以回到对话查看结果。'
+      title: `${event.title || 'Claude 对话'} · 回复完成`,
+      body: '可以回到对话查看结果。'
     })
     notification.on('click', () => {
       showMainWindow()
@@ -64,12 +70,39 @@ function notifyTerminalActivity(event: TerminalActivityEvent & { title: string }
 
 const terminal = new TerminalService(() => mainWindow, notifyTerminalActivity)
 const hookRelay = new HookRelayService()
+const approvals = new ApprovalBroker({
+  onChange: (requests) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send(IPC.approvalsChanged, requests)
+    }
+  },
+  notify: (request) => {
+    if (!desktopNotifications || !Notification.isSupported()) return
+    try {
+      const notification = new Notification({
+        title: `等待确认 · ${request.title}`,
+        body: `${request.toolName}：${request.toolInput.replace(/\s+/g, ' ').slice(0, 120)}`
+      })
+      notification.on('click', () => {
+        showMainWindow()
+        mainWindow?.webContents.send(IPC.focusSession, request.sessionId)
+        mainWindow?.webContents.send(IPC.approvalsOpen)
+      })
+      notification.show()
+    } catch {
+      // Notifications are best-effort.
+    }
+  }
+})
+terminal.setApprovalBroker(approvals)
+let triggerService: TriggerService | null = null
 const scheduledTasks = new ScheduledTaskService({
   userData: app.getPath('userData'),
   onChange: () => {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send(IPC.schedulesChanged)
     }
+    triggerService?.sync()
   },
   resolveSession: async (sessionId) => {
     const snapshot = await services.getSnapshot()
@@ -83,13 +116,71 @@ const scheduledTasks = new ScheduledTaskService({
     if (!desktopNotifications || !Notification.isSupported()) return
     try {
       const notification = new Notification({ title, body })
-      notification.on('click', () => showMainWindow())
+      notification.on('click', () => {
+        showMainWindow()
+        mainWindow?.webContents.send(IPC.approvalsOpen)
+      })
       notification.show()
     } catch {
       // Notifications are best-effort.
     }
   }
 })
+scheduledTasks.setHookRelay(hookRelay)
+scheduledTasks.setApprovalBroker(approvals)
+triggerService = new TriggerService({
+  listTasks: () => scheduledTasks.list(),
+  run: (id) => scheduledTasks.runNow(id),
+  isPaused: (id) => scheduledTasks.isPaused(id) || scheduledTasks.hasPendingAsk(id),
+  onSkipped: (id, reason) => {
+    void scheduledTasks.noteSkippedTrigger(id, reason).catch(() => undefined)
+  }
+})
+triggerService.start()
+
+function syncLocalApi(): Promise<void> {
+  localApiQueue = localApiQueue.then(async () => {
+    if (!localApiEnabled || isQuitting) {
+      const service = localApi
+      localApi = null
+      await service?.stop()
+    } else if (!localApi) {
+      await startLocalApi()
+    }
+  }).catch((error: unknown) => console.error('本地 HTTP 接口状态更新失败', error))
+  return localApiQueue
+}
+
+async function startLocalApi(): Promise<void> {
+  const token = await loadOrCreateApiToken(app.getPath('userData'))
+  if (!localApiEnabled || isQuitting) return
+  const service = new LocalApiService({
+    token,
+    handlers: {
+      status: () => ({
+        version: app.getVersion(),
+        tasks: scheduledTasks.list(),
+        inboxCount: buildInbox(approvals, scheduledTasks).length,
+        usage: scheduledTasks.usageSummary()
+      }),
+      listTasks: () => scheduledTasks.list(),
+      listInbox: () => buildInbox(approvals, scheduledTasks),
+      runTask: (id) => scheduledTasks.runNow(id),
+      pauseTask: (id, until, reason) => scheduledTasks.pause(id, until, reason),
+      resumeTask: (id) => scheduledTasks.resume(id),
+      replayTask: (id) => scheduledTasks.replay(id),
+      answerApproval: (id, decision) => approvals.resolve(id, decision),
+      answerAsk: (id, answer) => scheduledTasks.answerAsk(id, answer),
+      ignoreAsk: (id) => scheduledTasks.ignoreAsk(id),
+      emitEvent: (event) => scheduledTasks.dispatchEvent(event),
+      usage: () => scheduledTasks.usageSummary()
+    }
+  })
+  if (!(await service.start())) throw new Error('无法监听本地端口')
+  if (localApiEnabled && !isQuitting) localApi = service
+  else await service.stop()
+}
+
 const files = new FileService(app.getPath('userData'), dataRoot,
   (context) => services.getFileScope(context, context?.sessionId ? terminal.getFileContext(context.sessionId) : undefined),
   () => mainWindow)
@@ -107,6 +198,10 @@ let tray: Tray | null = null
 let isQuitting = false
 let backgroundNoticeShown = false
 let minimizeToTray = true
+let localApi: LocalApiService | null = null
+let localApiQueue = Promise.resolve()
+let localApiEnabled = false
+let sessionRefreshInterest = false
 let pendingRefresh = false
 let lastAttention: AttentionSummary = { total: 0, completed: 0, approval: 0 }
 
@@ -242,15 +337,22 @@ function registerScreenshotShortcut(): void {
   }
 }
 
-function applySettings(settings: AppSettings): void {
+async function applySettings(settings: AppSettings): Promise<void> {
   minimizeToTray = settings.minimizeToTray
   desktopNotifications = settings.desktopNotifications
+  localApiEnabled = settings.localApiEnabled
   nativeTheme.themeSource = settings.theme
   if (minimizeToTray) createTray()
   else destroyTray()
+  await syncLocalApi()
 }
 
 function createWindow(): void {
+  const windowIcon = process.platform === 'win32'
+    ? nativeImage.createFromPath(app.isPackaged
+        ? join(process.resourcesPath, 'icon.png')
+        : join(__dirname, '../../build/icon.png'))
+    : null
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 800,
@@ -259,6 +361,7 @@ function createWindow(): void {
     show: false,
     autoHideMenuBar: true,
     title: 'Claude Session Desk',
+    ...(windowIcon && !windowIcon.isEmpty() ? { icon: windowIcon } : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
@@ -266,6 +369,10 @@ function createWindow(): void {
       sandbox: true
     }
   })
+
+  if (windowIcon && !windowIcon.isEmpty()) {
+    mainWindow.setIcon(windowIcon)
+  }
 
   const openLink = (url: string): void => {
     const external = externalWebUrl(url)
@@ -322,6 +429,7 @@ if (!gotSingleInstanceLock) {
     const settings = await config.readSettings()
     minimizeToTray = settings.minimizeToTray
     desktopNotifications = settings.desktopNotifications
+    localApiEnabled = settings.localApiEnabled
     nativeTheme.themeSource = settings.theme
     registerIpc(
       services,
@@ -332,12 +440,22 @@ if (!gotSingleInstanceLock) {
       applyAttention,
       scheduledTasks,
       claudeMd,
-      git
+      git,
+      approvals,
+      async () => {
+        await localApiQueue
+        return localApi?.info ?? { enabled: localApiEnabled, url: null, token: null }
+      },
+      (interest) => {
+        sessionRefreshInterest = interest
+        if (interest) refreshData()
+      }
     )
     void hookRelay.start().then((started) => {
       if (started) terminal.setHookRelay(hookRelay)
     })
     void scheduledTasks.initialize().catch(() => undefined)
+    if (localApiEnabled) void syncLocalApi()
     registerScreenshotShortcut()
     if (minimizeToTray) createTray()
     createWindow()
@@ -345,7 +463,7 @@ if (!gotSingleInstanceLock) {
     void services.initialize().finally(() => {
       stopWatching = watchDataRoot(dataRoot, {
         onChange: () => {
-          refreshData()
+          if (sessionRefreshInterest) refreshData()
         },
         onError: () => {
           if (!watchErrorNotified) {
@@ -368,6 +486,9 @@ app.on('will-quit', () => {
 
 app.on('before-quit', () => {
   isQuitting = true
+  triggerService?.dispose()
+  approvals.dispose()
+  void syncLocalApi()
   scheduledTasks.dispose()
   terminal.dispose()
   void hookRelay.stop().catch(() => undefined)

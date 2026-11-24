@@ -52,6 +52,24 @@ export function formatUsageCost(value: number | null): string | null {
   return `$${value.toFixed(2)}`
 }
 
+/** True when two session-usage snapshots would render the same header. */
+export function sameUsage(
+  left: SessionUsage | null,
+  right: SessionUsage | null
+): boolean {
+  if (left === right) return true
+  if (!left || !right) return false
+  return left.inputTokens === right.inputTokens &&
+    left.outputTokens === right.outputTokens &&
+    left.cacheReadTokens === right.cacheReadTokens &&
+    left.cacheWriteTokens === right.cacheWriteTokens &&
+    left.costUSD === right.costUSD &&
+    left.contextTokens === right.contextTokens &&
+    left.contextLimit === right.contextLimit &&
+    left.contextPercent === right.contextPercent &&
+    left.model === right.model
+}
+
 export function summarizeUsage(events: SessionEvent[]): SessionUsage | null {
   const totals: TokenUsage = {
     inputTokens: 0,

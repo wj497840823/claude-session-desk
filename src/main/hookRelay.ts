@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 
-export type HookRelayHandler = (event: unknown) => void
+export type HookRelayHandler = (event: unknown) => unknown | Promise<unknown>
 
 export interface HookRelayLike {
   urlFor(ptyId: string): string | null
@@ -17,10 +17,20 @@ function tokensEqual(left: string, right: string): boolean {
   return a.length === b.length && timingSafeEqual(a, b)
 }
 
-function reply(response: ServerResponse, status: number): void {
-  if (response.writableEnded) return
-  response.writeHead(status, { 'Content-Type': 'application/json' })
-  response.end('{}')
+function reply(response: ServerResponse, status: number, body: unknown = {}): void {
+  if (response.writableEnded || response.destroyed) return
+  let payload = '{}'
+  try {
+    payload = JSON.stringify(body) ?? '{}'
+  } catch {
+    // A non-serializable handler result must not break the CLI.
+  }
+  try {
+    response.writeHead(status, { 'Content-Type': 'application/json' })
+    response.end(payload)
+  } catch {
+    // The client may have timed out or disconnected.
+  }
 }
 
 export class HookRelayService implements HookRelayLike {
@@ -140,13 +150,31 @@ export class HookRelayService implements HookRelayLike {
     request.on('end', () => {
       if (finished) return
       finished = true
-      reply(response, 200)
+      const text = Buffer.concat(chunks).toString('utf8')
+      let event: unknown
       try {
-        const text = Buffer.concat(chunks).toString('utf8')
-        if (text) handler(JSON.parse(text))
+        event = text ? JSON.parse(text) : undefined
       } catch {
         // Malformed payloads must not affect the CLI or the app.
+        reply(response, 200)
+        return
       }
+      let result: unknown
+      try {
+        result = handler(event)
+      } catch {
+        reply(response, 200)
+        return
+      }
+      Promise.resolve(result)
+        .then((value) => {
+          reply(
+            response,
+            200,
+            value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+          )
+        })
+        .catch(() => reply(response, 200))
     })
     request.on('error', () => {
       if (finished) return
